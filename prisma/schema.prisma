@@ -1,0 +1,242 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  PHOTOGRAPHER
+  BUYER
+  ADMIN
+}
+
+enum UsageRights {
+  editorial
+  commercial
+}
+
+enum PresetScope {
+  personal
+  team
+}
+
+enum UploadPresetAuditAction {
+  created
+  updated
+  deleted
+  cloned
+  approved_read_only
+}
+
+enum SavedGalleryMode {
+  private
+  team
+  shared_link
+}
+
+enum SavedGalleryMemberRole {
+  viewer
+  editor
+}
+
+enum ImageStatus {
+  pending
+  published
+  archived
+}
+
+enum OrderStatus {
+  pending
+  paid
+  failed
+  refunded
+}
+
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  name         String
+  role         UserRole
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  images       ImageAsset[] @relation("PhotographerImages")
+  orders       Order[]      @relation("BuyerOrders")
+  uploadPresets UploadPreset[]
+  approvedUploadPresets UploadPreset[] @relation("PresetApprover")
+  presetAudits UploadPresetAudit[] @relation("PresetAuditActor")
+  ownedGalleries SavedGallery[] @relation("GalleryOwner")
+  galleryMemberships SavedGalleryMember[]
+}
+
+model ImageAsset {
+  id             String      @id @default(cuid())
+  title          String
+  eventName      String
+  eventSlug      String
+  location       String
+  capturedAt     DateTime
+  filename       String      @unique
+  tags           String
+  attendeeKeywords String    @default("")
+  usageRights    UsageRights
+  priceUsd       Int
+  previewUrl     String
+  fullResUrl     String?
+  storageKey     String?
+  status         ImageStatus @default(pending)
+  reviewNote     String?
+  reviewedAt     DateTime?
+  publishedAt    DateTime?
+  photographerId String
+  photographer   User        @relation("PhotographerImages", fields: [photographerId], references: [id])
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  orderItems     OrderItem[]
+  savedGalleryItems SavedGalleryItem[]
+
+  @@index([eventSlug])
+  @@index([status])
+}
+
+model EventPolicy {
+  id          String   @id @default(cuid())
+  eventSlug   String   @unique
+  eventName   String
+  isPrivate   Boolean  @default(false)
+  accessCode  String?
+  embargoUntil DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  buyerId     String
+  buyer       User        @relation("BuyerOrders", fields: [buyerId], references: [id])
+  totalUsd    Int
+  currency    String      @default("USD")
+  status      OrderStatus @default(pending)
+  paymentProvider String  @default("mock")
+  paymentReference String?
+  receiptToken String     @unique @default(cuid())
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  orderItems  OrderItem[]
+}
+
+model OrderItem {
+  id        String     @id @default(cuid())
+  orderId   String
+  imageId   String
+  priceUsd  Int
+  licenseCode String   @default("standard-editorial")
+  order     Order      @relation(fields: [orderId], references: [id])
+  image     ImageAsset @relation(fields: [imageId], references: [id])
+  createdAt DateTime   @default(now())
+
+  @@unique([orderId, imageId])
+}
+
+model UploadPreset {
+  id               String   @id @default(cuid())
+  name             String
+  folder           String   @default("General")
+  scope            PresetScope @default(personal)
+  eventName        String
+  location         String
+  priceUsd         Int
+  usageRights      UsageRights
+  tags             String   @default("")
+  attendeeKeywords String   @default("")
+  isReadOnly       Boolean  @default(false)
+  isShared         Boolean  @default(true)
+  createdById      String
+  createdBy        User     @relation(fields: [createdById], references: [id])
+  approvedById     String?
+  approvedBy       User?    @relation("PresetApprover", fields: [approvedById], references: [id])
+  audits           UploadPresetAudit[]
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([isShared])
+  @@index([scope])
+  @@index([folder])
+  @@index([createdById])
+}
+
+model UploadPresetAudit {
+  id          String                 @id @default(cuid())
+  presetId    String?
+  preset      UploadPreset?          @relation(fields: [presetId], references: [id], onDelete: SetNull)
+  presetName  String
+  action      UploadPresetAuditAction
+  actorId     String
+  actor       User                   @relation("PresetAuditActor", fields: [actorId], references: [id])
+  detail      String?                @default("")
+  createdAt   DateTime               @default(now())
+
+  @@index([presetId])
+  @@index([actorId])
+  @@index([createdAt])
+}
+
+model SavedGallery {
+  id          String              @id @default(cuid())
+  name        String
+  description String              @default("")
+  mode        SavedGalleryMode    @default(private)
+  ownerId     String
+  owner       User                @relation("GalleryOwner", fields: [ownerId], references: [id])
+  items       SavedGalleryItem[]
+  members     SavedGalleryMember[]
+  shareLinks  SavedGalleryShareLink[]
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@index([ownerId])
+  @@index([mode])
+}
+
+model SavedGalleryItem {
+  id          String      @id @default(cuid())
+  galleryId   String
+  imageId     String
+  note        String      @default("")
+  addedById   String?
+  addedAt     DateTime    @default(now())
+  gallery     SavedGallery @relation(fields: [galleryId], references: [id], onDelete: Cascade)
+  image       ImageAsset  @relation(fields: [imageId], references: [id])
+
+  @@unique([galleryId, imageId])
+  @@index([galleryId])
+  @@index([imageId])
+}
+
+model SavedGalleryMember {
+  id          String                @id @default(cuid())
+  galleryId   String
+  userId      String
+  role        SavedGalleryMemberRole @default(viewer)
+  createdAt   DateTime              @default(now())
+  gallery     SavedGallery          @relation(fields: [galleryId], references: [id], onDelete: Cascade)
+  user        User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([galleryId, userId])
+  @@index([userId])
+}
+
+model SavedGalleryShareLink {
+  id          String      @id @default(cuid())
+  galleryId   String
+  token       String      @unique
+  expiresAt   DateTime?
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  gallery     SavedGallery @relation(fields: [galleryId], references: [id], onDelete: Cascade)
+
+  @@index([galleryId])
+  @@index([token])
+}
