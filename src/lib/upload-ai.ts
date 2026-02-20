@@ -35,6 +35,21 @@ type SuggestUploadMetadataArgs = {
   };
 };
 
+function getAiTimeoutMs() {
+  const parsed = Number.parseInt(process.env.AI_UPLOAD_REQUEST_TIMEOUT_MS || "", 10);
+  return Number.isFinite(parsed) && parsed >= 3000 ? parsed : 20000;
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = getAiTimeoutMs()) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export type KnownSubjectReference = {
   name: string;
   referenceImageDataUrl: string;
@@ -152,7 +167,7 @@ async function tryOpenAiSuggestions({
   ];
   if (imageDataUrl) inputContent.push({ type: "input_image", image_url: imageDataUrl });
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await fetchWithTimeout("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -237,7 +252,7 @@ export async function transcribeVoiceNote(voiceFile: File): Promise<string | und
   payload.append("model", model);
   payload.append("file", voiceFile, voiceFile.name || "voice-note.wav");
 
-  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+  const response = await fetchWithTimeout("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -262,7 +277,7 @@ export async function detectSubjectNameFromCard(args: {
   if (!apiKey) return { confidence: 0, source: "none" };
   const model = process.env.AI_UPLOAD_MODEL || "gpt-4.1-mini";
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await fetchWithTimeout("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -350,7 +365,7 @@ export async function matchSubjectAgainstKnown(args: {
     content.push({ type: "input_image", image_url: subject.referenceImageDataUrl });
   }
 
-  const response = await fetch("https://api.openai.com/v1/responses", {
+  const response = await fetchWithTimeout("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
