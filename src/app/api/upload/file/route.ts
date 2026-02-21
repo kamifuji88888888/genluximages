@@ -92,15 +92,28 @@ export async function POST(request: NextRequest) {
   const previewOutputPath = path.join(previewDir, outputName);
   await writeFile(fullOutputPath, inputBytes);
 
-  const metadata = await sharp(inputBytes).metadata();
-  const resizedPreview = await sharp(inputBytes)
-    .resize({
-      width: 1400,
-      height: 1400,
-      fit: "inside",
-      withoutEnlargement: true,
-    })
-    .toBuffer();
+  let metadata: sharp.Metadata;
+  let resizedPreview: Buffer;
+  try {
+    metadata = await sharp(inputBytes).metadata();
+    resizedPreview = await sharp(inputBytes)
+      .resize({
+        width: 1400,
+        height: 1400,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .toBuffer();
+  } catch {
+    return NextResponse.json(
+      {
+        ok: false,
+        message:
+          "Unsupported or corrupted image file. Please upload a standard JPG/PNG/WebP export (not RAW sidecar or placeholder file).",
+      },
+      { status: 415 },
+    );
+  }
   const resizedMeta = await sharp(resizedPreview).metadata();
   const resizedWidth = resizedMeta.width ?? 1200;
   const resizedHeight = resizedMeta.height ?? 900;
