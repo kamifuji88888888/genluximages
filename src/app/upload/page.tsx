@@ -156,6 +156,7 @@ export default function UploadPage() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [activeQueueId, setActiveQueueId] = useState<string | null>(null);
   const queueRef = useRef<QueueItem[]>([]);
+  const filePickerRef = useRef<HTMLInputElement | null>(null);
   const [role, setRole] = useState<string | null>(null);
   const [values, setValues] = useState<UploadFormValues>({
     title: "",
@@ -843,13 +844,31 @@ export default function UploadPage() {
     payload.append("file", item.file);
     if (item.voiceNote) payload.append("voiceNote", item.voiceNote);
     payload.append("autoApplySubjectMatches", batchAutoApplySubjectMatches ? "1" : "0");
-
-    const response = await fetch("/api/upload/file", {
-      method: "POST",
-      body: payload,
-    });
-    const data = (await response.json()) as UploadAutomationResponse;
-    setIsAutoUploading(false);
+    const controller = new AbortController();
+    const timeoutMs = 90000;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    let data: UploadAutomationResponse;
+    try {
+      const response = await fetch("/api/upload/file", {
+        method: "POST",
+        body: payload,
+        signal: controller.signal,
+      });
+      data = (await response.json()) as UploadAutomationResponse;
+    } catch (error) {
+      const message =
+        error instanceof Error && error.name === "AbortError"
+          ? "Upload automation timed out. Please retry or process fewer files at once."
+          : error instanceof Error
+            ? error.message
+            : "Upload automation failed.";
+      setStatus({ ok: false, message });
+      updateQueueItem(item.id, { localStatus: "error" });
+      return false;
+    } finally {
+      clearTimeout(timeoutId);
+      setIsAutoUploading(false);
+    }
     setStatus({ ok: data.ok, message: data.message });
 
     if (!data.ok || !data.data) {
@@ -1054,6 +1073,7 @@ export default function UploadPage() {
             from your filename.
           </p>
           <input
+            ref={filePickerRef}
             type="file"
             accept="image/jpeg,image/jpg,image/png,image/webp,video/mp4,video/quicktime,video/x-m4v,video/webm,audio/wav,audio/x-wav"
             className="mt-3 block w-full text-sm text-slate-700"
@@ -1067,9 +1087,18 @@ export default function UploadPage() {
           <div
             onDragOver={(event) => event.preventDefault()}
             onDrop={handleDrop}
-            className="mt-3 rounded-xl border border-dashed border-slate-300 p-3 text-xs text-slate-600"
+            onClick={() => filePickerRef.current?.click()}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                filePickerRef.current?.click();
+              }
+            }}
+            role="button"
+            tabIndex={0}
+            className="mt-3 cursor-pointer rounded-xl border border-dashed border-slate-300 p-3 text-xs text-slate-600 hover:bg-slate-50"
           >
-            Drag and drop images/videos here to build a queue.
+            Drag and drop images/videos here, or click to upload.
           </div>
           {queue.length > 0 ? (
             <div className="mt-3 space-y-2">
