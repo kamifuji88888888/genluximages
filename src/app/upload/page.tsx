@@ -29,6 +29,18 @@ type UploadAutomationResponse = {
       suggestedAttendeeKeywords?: string[];
       captionDraft?: string;
       voiceTranscript?: string;
+      voiceNoteMatched?: boolean;
+      voiceTranscriptStatus?:
+        | "not_provided"
+        | "transcribed"
+        | "empty"
+        | "request_failed"
+        | "unsupported_format"
+        | "provider_disabled"
+        | "missing_api_key";
+      voiceTranscriptMessage?: string;
+      voiceTitleCandidate?: string;
+      voiceTitleApplied?: boolean;
       subjectName?: string;
       subjectSource?: "none" | "card" | "match";
       subjectConfidence?: number;
@@ -48,6 +60,18 @@ type LatestAiSuggestion = {
   attendeeKeywords: string;
   captionDraft: string;
   voiceTranscript: string;
+  voiceNoteMatched: boolean;
+  voiceTranscriptStatus:
+    | "not_provided"
+    | "transcribed"
+    | "empty"
+    | "request_failed"
+    | "unsupported_format"
+    | "provider_disabled"
+    | "missing_api_key";
+  voiceTranscriptMessage: string;
+  voiceTitleCandidate: string;
+  voiceTitleApplied: boolean;
   subjectName: string;
   subjectSource: "none" | "card" | "match";
   subjectConfidence: number;
@@ -337,6 +361,24 @@ export default function UploadPage() {
 
   const aiFieldClass = (key: keyof UploadFormValues) =>
     aiHighlightedFields.includes(key) ? "ring-2 ring-blue-300 bg-blue-50 transition" : "";
+  const voiceTranscriptStatusLabel = (status: LatestAiSuggestion["voiceTranscriptStatus"]) => {
+    switch (status) {
+      case "transcribed":
+        return "success";
+      case "empty":
+        return "no speech detected";
+      case "request_failed":
+        return "failed";
+      case "unsupported_format":
+        return "unsupported format";
+      case "provider_disabled":
+        return "provider disabled";
+      case "missing_api_key":
+        return "missing API key";
+      default:
+        return "not provided";
+    }
+  };
 
   useEffect(() => {
     if (!activeQueueFilename) return;
@@ -1059,6 +1101,11 @@ export default function UploadPage() {
       attendeeKeywords: suggestedAttendeeKeywords,
       captionDraft: data.data?.suggestions?.captionDraft || "",
       voiceTranscript: data.data?.suggestions?.voiceTranscript || "",
+      voiceNoteMatched: data.data?.suggestions?.voiceNoteMatched ?? Boolean(item.voiceNote),
+      voiceTranscriptStatus: data.data?.suggestions?.voiceTranscriptStatus || "not_provided",
+      voiceTranscriptMessage: data.data?.suggestions?.voiceTranscriptMessage || "",
+      voiceTitleCandidate: data.data?.suggestions?.voiceTitleCandidate || "",
+      voiceTitleApplied: data.data?.suggestions?.voiceTitleApplied ?? false,
       subjectName: data.data?.suggestions?.subjectName || "",
       subjectSource: data.data?.suggestions?.subjectSource || "none",
       subjectConfidence: data.data?.suggestions?.subjectConfidence ?? 0,
@@ -1572,7 +1619,7 @@ export default function UploadPage() {
                   checked={batchAutoApplySubjectMatches}
                   onChange={(event) => setBatchAutoApplySubjectMatches(event.target.checked)}
                 />
-                Auto-apply subject matches (name cards + same-subject recognition)
+                Auto-apply subject matches (name slates/boards/cards + same-subject recognition)
               </label>
               <button
                 type="button"
@@ -1657,6 +1704,35 @@ export default function UploadPage() {
                   &quot;
                 </p>
               ) : null}
+              <div className="mt-2 rounded-lg border border-blue-200 bg-white/70 p-2 text-[11px] text-blue-900">
+                <p>
+                  Voice note matched:{" "}
+                  <span className="font-semibold">
+                    {latestAiSuggestion.voiceNoteMatched ? "yes" : "no"}
+                  </span>
+                </p>
+                <p>
+                  Transcript status:{" "}
+                  <span className="font-semibold">
+                    {voiceTranscriptStatusLabel(latestAiSuggestion.voiceTranscriptStatus)}
+                  </span>
+                  {latestAiSuggestion.voiceTranscriptMessage
+                    ? ` (${latestAiSuggestion.voiceTranscriptMessage})`
+                    : ""}
+                </p>
+                <p>
+                  Extracted title/name from WAV:{" "}
+                  <span className="font-semibold">
+                    {latestAiSuggestion.voiceTitleCandidate || "(none)"}
+                  </span>
+                </p>
+                <p>
+                  Applied to title:{" "}
+                  <span className="font-semibold">
+                    {latestAiSuggestion.voiceTitleApplied ? "yes" : "no"}
+                  </span>
+                </p>
+              </div>
               <p className="mt-2 text-[11px] text-blue-800">
                 title: {latestAiSuggestion.title || "(none)"} | event:{" "}
                 {latestAiSuggestion.eventName || "(none)"} | location:{" "}

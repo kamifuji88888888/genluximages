@@ -61,7 +61,113 @@ export type SubjectDetectionResult = {
   source: "none" | "card" | "match";
 };
 
-function titleFromVoiceTranscript(transcript?: string) {
+function normalizeDetectedNameCandidate(value: string) {
+  const cleaned = value
+    .replace(/\b(name|subject|talent|guest)\s*[:\-]\s*/gi, " ")
+    .replace(/[^a-zA-Z\s.'-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  const parts = cleaned
+    .split(" ")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .slice(0, 4);
+  if (parts.length === 0) return "";
+  return parts
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+    .join(" ");
+}
+
+export type VoiceTranscriptStatus =
+  | "transcribed"
+  | "empty"
+  | "request_failed"
+  | "unsupported_format"
+  | "provider_disabled"
+  | "missing_api_key";
+
+export type VoiceTranscriptResult = {
+  transcript?: string;
+  status: VoiceTranscriptStatus;
+  message: string;
+};
+
+function toTitleCase(value: string) {
+  return value
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(" ");
+}
+
+function extractSpelledNameFromTranscript(transcript: string) {
+  const normalized = transcript
+    .toLowerCase()
+    .replace(/[-_/]/g, " ")
+    .replace(/[.,!?;:()"'`]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+
+  const spellingCue = /\b(spell|spelled|spelling|letters?)\b/i;
+  const cueIndex = normalized.search(spellingCue);
+  const searchSegment = cueIndex >= 0 ? normalized.slice(cueIndex) : normalized;
+  const tokens = searchSegment.split(" ").filter(Boolean);
+
+  const groups: string[] = [];
+  let currentLetters: string[] = [];
+  const flush = () => {
+    if (currentLetters.length >= 2) groups.push(currentLetters.join(""));
+    currentLetters = [];
+  };
+
+  for (const token of tokens) {
+    if (/^[a-z]$/.test(token)) {
+      currentLetters.push(token);
+      continue;
+    }
+    if (token === "and" || token === "comma" || token === "dot" || token === "period") {
+      flush();
+      continue;
+    }
+    flush();
+    if (groups.length >= 2) break;
+  }
+  flush();
+
+  if (groups.length === 0) return "";
+  return groups.slice(0, 2).map(toTitleCase).join(" ");
+}
+
+function extractNamedSubjectFromTranscript(transcript: string) {
+  const normalized = transcript
+    .toLowerCase()
+    .replace(/[-_/]/g, " ")
+    .replace(/[.,!?;:()"'`]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return "";
+
+  const phrasePatterns = [
+    /\b(?:name is|subject is|this is|it is|it's)\s+([a-z]+(?:\s+[a-z]+){0,2})\b/i,
+    /\b(?:featuring|with)\s+([a-z]+(?:\s+[a-z]+){0,2})\b/i,
+  ];
+  for (const pattern of phrasePatterns) {
+    const match = normalized.match(pattern);
+    if (!match?.[1]) continue;
+    const candidate = match[1]
+      .split(" ")
+      .filter((part) => part.length > 1)
+      .slice(0, 3)
+      .join(" ");
+    if (!candidate) continue;
+    return toTitleCase(candidate);
+  }
+  return "";
+}
+
+export function extractTitleFromVoiceTranscript(transcript?: string) {
   if (!transcript) return "";
   const cleaned = transcript
     .replace(/\s+/g, " ")
@@ -69,11 +175,20 @@ function titleFromVoiceTranscript(transcript?: string) {
     .trim();
   if (!cleaned) return "";
 
+  const spokenName = extractNamedSubjectFromTranscript(cleaned);
+  const spelledName = extractSpelledNameFromTranscript(cleaned);
+  if (spokenName && spelledName) {
+    const spokenFirst = spokenName.split(" ")[0]?.toLowerCase() || "";
+    const spelledFirst = spelledName.split(" ")[0]?.toLowerCase() || "";
+    if (spokenFirst && spokenFirst === spelledFirst) return spelledName;
+    return spokenName;
+  }
+  if (spokenName) return spokenName;
+  if (spelledName) return spelledName;
+
   const words = cleaned.split(" ").filter(Boolean).slice(0, 6);
   if (words.length === 0) return "";
-  return words
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(" ");
+  return toTitleCase(words.join(" "));
 }
 
 function normalizeList(values: string[] | undefined) {
@@ -125,7 +240,7 @@ function fallbackSuggestions({
     ? `${parsed.suggestedTitle || "Event moment"} at ${parsed.suggestedEventName}.`
     : `${parsed.suggestedTitle || "Event moment"} from live coverage.`;
 
-  const voiceTitle = titleFromVoiceTranscript(voiceTranscript);
+  const voiceTitle = extractTitleFromVoiceTranscript(voiceTranscript);
   return {
     capturedAt: parsed.capturedAt,
     eventSlug: parsed.eventSlug,
@@ -160,6 +275,7 @@ async function tryOpenAiSuggestions({
     `Voice transcript (if any): ${voiceTranscript || "(none)"}`,
     `Image metadata: width=${String(metadata.width || 0)} height=${String(metadata.height || 0)} format=${metadata.format || "(unknown)"}`,
     "Generate metadata that helps photographers submit quickly. If transcript contains a person name, prioritize that as suggestedTitle.",
+    "If the transcript spells the name letter-by-letter, reconstruct the proper name and prioritize that.",
   ].join("\n");
 
   const inputContent: Array<{ type: "input_text" | "input_image"; text?: string; image_url?: string }> = [
@@ -238,14 +354,29 @@ async function tryOpenAiSuggestions({
   };
 }
 
-export async function transcribeVoiceNote(voiceFile: File): Promise<string | undefined> {
-  if ((process.env.AI_UPLOAD_PROVIDER || "").toLowerCase() !== "openai") return undefined;
+export async function transcribeVoiceNoteDetailed(voiceFile: File): Promise<VoiceTranscriptResult> {
   const apiKey = process.env.OPENAI_API_KEY || "";
-  if (!apiKey) return undefined;
+  if ((process.env.AI_UPLOAD_PROVIDER || "").toLowerCase() !== "openai") {
+    return {
+      status: "provider_disabled",
+      message: "AI provider is not set to OpenAI for transcription.",
+    };
+  }
+  if (!apiKey) {
+    return {
+      status: "missing_api_key",
+      message: "OPENAI_API_KEY is missing; WAV transcription skipped.",
+    };
+  }
 
   const filename = (voiceFile.name || "").toLowerCase();
   const isWave = filename.endsWith(".wav") || filename.endsWith(".wave");
-  if (!isWave) return undefined;
+  if (!isWave) {
+    return {
+      status: "unsupported_format",
+      message: "Voice note is not a WAV file.",
+    };
+  }
 
   const model = process.env.AI_UPLOAD_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
   const payload = new FormData();
@@ -259,10 +390,30 @@ export async function transcribeVoiceNote(voiceFile: File): Promise<string | und
     },
     body: payload,
   });
-  if (!response.ok) return undefined;
+  if (!response.ok) {
+    return {
+      status: "request_failed",
+      message: `OpenAI transcription request failed (${response.status}).`,
+    };
+  }
   const data = (await response.json()) as { text?: string };
   const transcript = data.text?.trim();
-  return transcript || undefined;
+  if (!transcript) {
+    return {
+      status: "empty",
+      message: "Transcription completed but no speech text was detected.",
+    };
+  }
+  return {
+    transcript,
+    status: "transcribed",
+    message: "Voice note transcribed successfully.",
+  };
+}
+
+export async function transcribeVoiceNote(voiceFile: File): Promise<string | undefined> {
+  const result = await transcribeVoiceNoteDetailed(voiceFile);
+  return result.transcript;
 }
 
 export async function detectSubjectNameFromCard(args: {
@@ -291,7 +442,7 @@ export async function detectSubjectNameFromCard(args: {
           content: [
             {
               type: "input_text",
-              text: "Detect if this image contains a handwritten or printed name card. Return JSON only.",
+              text: "Detect whether the image includes a visible name slate/name board/dry erase board (or paper name card) associated with the subject. Extract only the person name written on the board/card. Return JSON only.",
             },
           ],
         },
@@ -330,7 +481,7 @@ export async function detectSubjectNameFromCard(args: {
     detectedName: string;
     confidence: number;
   };
-  const name = parsed.detectedName.trim();
+  const name = normalizeDetectedNameCandidate(parsed.detectedName || "");
   if (!parsed.hasNameCard || !name) return { confidence: 0, source: "none" };
   return {
     subjectName: name,

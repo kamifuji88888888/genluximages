@@ -8,9 +8,10 @@ import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
 import { getKnownSubjectsForEvent, upsertKnownSubjectForEvent } from "@/lib/subject-memory";
 import {
   detectSubjectNameFromCard,
+  extractTitleFromVoiceTranscript,
   matchSubjectAgainstKnown,
   suggestUploadMetadata,
-  transcribeVoiceNote,
+  transcribeVoiceNoteDetailed,
 } from "@/lib/upload-ai";
 import {
   extractImageNumber,
@@ -206,6 +207,7 @@ export async function POST(request: NextRequest) {
   const storageKey = `local/uploads/full/${outputName}`;
   const filenameSuggestion = parseCatalogFilename(originalName);
   let aiImageDataUrl: string | undefined;
+  let subjectDetectionImageDataUrl: string | undefined;
   try {
     const aiImageBuffer = await sharp(inputBytes)
       .resize({
@@ -217,17 +219,46 @@ export async function POST(request: NextRequest) {
       .jpeg({ quality: 72 })
       .toBuffer();
     aiImageDataUrl = `data:image/jpeg;base64,${aiImageBuffer.toString("base64")}`;
+
+    const subjectBuffer = await sharp(inputBytes)
+      .resize({
+        width: 1280,
+        height: 1280,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .jpeg({ quality: 82 })
+      .toBuffer();
+    subjectDetectionImageDataUrl = `data:image/jpeg;base64,${subjectBuffer.toString("base64")}`;
   } catch {
     aiImageDataUrl = undefined;
+    subjectDetectionImageDataUrl = undefined;
   }
-  let voiceTranscript: string | undefined;
-  if (voiceNote instanceof File && voiceNote.size > 0) {
+  const matchedVoiceNote = voiceNote instanceof File && voiceNote.size > 0 ? voiceNote : null;
+  const voiceNoteMatched = Boolean(matchedVoiceNote);
+  let voiceTranscript = "";
+  let voiceTranscriptStatus:
+    | "not_provided"
+    | "transcribed"
+    | "empty"
+    | "request_failed"
+    | "unsupported_format"
+    | "provider_disabled"
+    | "missing_api_key" = "not_provided";
+  let voiceTranscriptMessage = "No voice note matched to this media file.";
+  if (matchedVoiceNote) {
     try {
-      voiceTranscript = await transcribeVoiceNote(voiceNote);
+      const transcriptResult = await transcribeVoiceNoteDetailed(matchedVoiceNote);
+      voiceTranscript = transcriptResult.transcript || "";
+      voiceTranscriptStatus = transcriptResult.status;
+      voiceTranscriptMessage = transcriptResult.message;
     } catch {
-      voiceTranscript = undefined;
+      voiceTranscript = "";
+      voiceTranscriptStatus = "request_failed";
+      voiceTranscriptMessage = "Transcription failed due to a temporary processing error.";
     }
   }
+  const voiceTitleCandidate = extractTitleFromVoiceTranscript(voiceTranscript);
   let aiSuggestion = await suggestUploadMetadata({
     filename: originalName,
     parsed: filenameSuggestion,
@@ -243,11 +274,11 @@ export async function POST(request: NextRequest) {
   let subjectName = "";
   let subjectSource: "none" | "card" | "match" = "none";
   let subjectConfidence = 0;
-  if (autoApplySubjectMatches && aiImageDataUrl) {
+  if (autoApplySubjectMatches && subjectDetectionImageDataUrl) {
     try {
       const cardResult = await detectSubjectNameFromCard({
         filename: originalName,
-        imageDataUrl: aiImageDataUrl,
+        imageDataUrl: subjectDetectionImageDataUrl,
       });
       if (cardResult.subjectName && cardResult.confidence >= 0.72) {
         subjectName = cardResult.subjectName;
@@ -257,7 +288,7 @@ export async function POST(request: NextRequest) {
           uploaderEmail: session.email,
           eventSlug: eventSlugForSubjects,
           name: subjectName,
-          referenceImageDataUrl: aiImageDataUrl,
+          referenceImageDataUrl: subjectDetectionImageDataUrl,
         });
       } else {
         const knownSubjects = getKnownSubjectsForEvent({
@@ -265,7 +296,7 @@ export async function POST(request: NextRequest) {
           eventSlug: eventSlugForSubjects,
         });
         const matchResult = await matchSubjectAgainstKnown({
-          imageDataUrl: aiImageDataUrl,
+          imageDataUrl: subjectDetectionImageDataUrl,
           knownSubjects,
         });
         if (matchResult.subjectName && matchResult.confidence >= 0.8) {
@@ -316,7 +347,14 @@ export async function POST(request: NextRequest) {
         suggestedTags: aiSuggestion.suggestedTags,
         suggestedAttendeeKeywords: aiSuggestion.suggestedAttendeeKeywords,
         captionDraft: aiSuggestion.captionDraft || "",
-        voiceTranscript: voiceTranscript || "",
+        voiceTranscript,
+        voiceNoteMatched,
+        voiceTranscriptStatus,
+        voiceTranscriptMessage,
+        voiceTitleCandidate,
+        voiceTitleApplied:
+          Boolean(voiceTitleCandidate) &&
+          aiSuggestion.suggestedTitle?.toLowerCase() === voiceTitleCandidate.toLowerCase(),
         subjectName: subjectName || "",
         subjectSource,
         subjectConfidence,
