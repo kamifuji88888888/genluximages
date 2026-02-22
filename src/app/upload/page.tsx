@@ -157,6 +157,7 @@ export default function UploadPage() {
   const [activeQueueId, setActiveQueueId] = useState<string | null>(null);
   const queueRef = useRef<QueueItem[]>([]);
   const filePickerRef = useRef<HTMLInputElement | null>(null);
+  const uploadFileInputId = "upload-file-input";
   const [role, setRole] = useState<string | null>(null);
   const [values, setValues] = useState<UploadFormValues>({
     title: "",
@@ -632,7 +633,7 @@ export default function UploadPage() {
     });
   };
 
-  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+  const handleDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     const dropped = Array.from(event.dataTransfer.files);
     addFilesToQueue(dropped);
@@ -1074,6 +1075,7 @@ export default function UploadPage() {
           </p>
           <input
             ref={filePickerRef}
+            id={uploadFileInputId}
             type="file"
             accept="image/jpeg,image/jpg,image/png,image/webp,video/mp4,video/quicktime,video/x-m4v,video/webm,audio/wav,audio/x-wav"
             className="mt-3 block w-full text-sm text-slate-700"
@@ -1084,10 +1086,10 @@ export default function UploadPage() {
               if (files.length > 0) addFilesToQueue(files);
             }}
           />
-          <div
+          <label
+            htmlFor={uploadFileInputId}
             onDragOver={(event) => event.preventDefault()}
             onDrop={handleDrop}
-            onClick={() => filePickerRef.current?.click()}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
@@ -1099,7 +1101,7 @@ export default function UploadPage() {
             className="mt-3 cursor-pointer rounded-xl border border-dashed border-slate-300 p-3 text-xs text-slate-600 hover:bg-slate-50"
           >
             Drag and drop images/videos here, or click to upload.
-          </div>
+          </label>
           {queue.length > 0 ? (
             <div className="mt-3 space-y-2">
               {invalidQueueCount > 0 ? (
