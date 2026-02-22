@@ -138,6 +138,15 @@ type QueueItem = {
   draft: QueueDraft;
 };
 
+type AiUpdatableField =
+  | "title"
+  | "eventName"
+  | "eventSlug"
+  | "capturedAt"
+  | "location"
+  | "tags"
+  | "attendeeKeywords";
+
 function filenameStem(name: string) {
   return name.replace(/\.[^.]+$/, "").toLowerCase();
 }
@@ -192,6 +201,8 @@ export default function UploadPage() {
   const [presetReadOnly, setPresetReadOnly] = useState(false);
   const [presetHistory, setPresetHistory] = useState<PresetHistoryEntry[]>([]);
   const [latestAiSuggestion, setLatestAiSuggestion] = useState<LatestAiSuggestion | null>(null);
+  const [aiHighlightedFields, setAiHighlightedFields] = useState<(keyof UploadFormValues)[]>([]);
+  const aiHighlightTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -253,6 +264,9 @@ export default function UploadPage() {
 
   useEffect(
     () => () => {
+      if (aiHighlightTimeoutRef.current) {
+        window.clearTimeout(aiHighlightTimeoutRef.current);
+      }
       for (const item of queueRef.current) URL.revokeObjectURL(item.objectUrl);
     },
     [],
@@ -261,6 +275,10 @@ export default function UploadPage() {
   const activeQueueItem = useMemo(
     () => queue.find((item) => item.id === activeQueueId) ?? null,
     [activeQueueId, queue],
+  );
+  const activeQueueFilename = useMemo(
+    () => (activeQueueItem ? activeQueueItem.draft.filename || activeQueueItem.file.name : ""),
+    [activeQueueItem],
   );
   const invalidQueueCount = useMemo(
     () => queue.filter((item) => !item.filenameValid).length,
@@ -307,19 +325,55 @@ export default function UploadPage() {
     setValues((current) => ({ ...current, [key]: value }));
   };
 
+  const aiFieldClass = (key: keyof UploadFormValues) =>
+    aiHighlightedFields.includes(key) ? "ring-2 ring-blue-300 bg-blue-50 transition" : "";
+
+  useEffect(() => {
+    if (!activeQueueFilename) return;
+    setValues((current) =>
+      current.filename === activeQueueFilename
+        ? current
+        : {
+            ...current,
+            filename: activeQueueFilename,
+          },
+    );
+  }, [activeQueueFilename]);
+
   const applyLatestAiToForm = () => {
     if (!latestAiSuggestion) return;
-    setValues((current) => ({
-      ...current,
-      title: latestAiSuggestion.title || current.title,
-      eventName: latestAiSuggestion.eventName || current.eventName,
-      eventSlug: latestAiSuggestion.eventSlug || current.eventSlug,
-      capturedAt: latestAiSuggestion.capturedAt || current.capturedAt,
-      location: latestAiSuggestion.location || current.location,
-      tags: latestAiSuggestion.tags || current.tags,
-      attendeeKeywords: latestAiSuggestion.attendeeKeywords || current.attendeeKeywords,
-    }));
-    setStatus({ ok: true, message: "Applied AI suggestions to the upload form." });
+    const nextValues = { ...values };
+    const changedFields: AiUpdatableField[] = [];
+    const aiUpdates: Array<[AiUpdatableField, string]> = [
+      ["title", latestAiSuggestion.title],
+      ["eventName", latestAiSuggestion.eventName],
+      ["eventSlug", latestAiSuggestion.eventSlug],
+      ["capturedAt", latestAiSuggestion.capturedAt],
+      ["location", latestAiSuggestion.location],
+      ["tags", latestAiSuggestion.tags],
+      ["attendeeKeywords", latestAiSuggestion.attendeeKeywords],
+    ];
+    for (const [key, candidate] of aiUpdates) {
+      if (!candidate || candidate === nextValues[key]) continue;
+      nextValues[key] = candidate;
+      changedFields.push(key);
+    }
+    setValues(nextValues);
+    setAiHighlightedFields(changedFields);
+    if (aiHighlightTimeoutRef.current) {
+      window.clearTimeout(aiHighlightTimeoutRef.current);
+    }
+    aiHighlightTimeoutRef.current = window.setTimeout(() => {
+      setAiHighlightedFields([]);
+      aiHighlightTimeoutRef.current = null;
+    }, 1800);
+    setStatus({
+      ok: true,
+      message:
+        changedFields.length > 0
+          ? `Applied AI suggestions to ${changedFields.length} field(s).`
+          : "Applied AI suggestions (no field values changed).",
+    });
   };
 
   const applyLatestAiToBatchDefaults = () => {
@@ -639,6 +693,39 @@ export default function UploadPage() {
     addFilesToQueue(dropped);
   };
 
+  const canDecodeImageFile = async (file: File) => {
+    if (typeof window === "undefined") return true;
+    try {
+      if ("createImageBitmap" in window) {
+        const bitmap = await createImageBitmap(file);
+        bitmap.close();
+        return true;
+      }
+    } catch {
+      return false;
+    }
+
+    return await new Promise<boolean>((resolve) => {
+      const objectUrl = URL.createObjectURL(file);
+      const img = new window.Image();
+      const timeoutId = setTimeout(() => {
+        URL.revokeObjectURL(objectUrl);
+        resolve(false);
+      }, 10000);
+      img.onload = () => {
+        clearTimeout(timeoutId);
+        URL.revokeObjectURL(objectUrl);
+        resolve(true);
+      };
+      img.onerror = () => {
+        clearTimeout(timeoutId);
+        URL.revokeObjectURL(objectUrl);
+        resolve(false);
+      };
+      img.src = objectUrl;
+    });
+  };
+
   const uploadPartWithProgress = (
     signedUrl: string,
     chunk: Blob,
@@ -838,6 +925,16 @@ export default function UploadPage() {
       updateQueueItem(item.id, { localStatus: "error" });
       return false;
     }
+    const decodable = await canDecodeImageFile(item.file);
+    if (!decodable) {
+      setStatus({
+        ok: false,
+        message:
+          "Unsupported or corrupted image file. Please export a standard JPG/PNG/WebP from your editor and retry.",
+      });
+      updateQueueItem(item.id, { localStatus: "error" });
+      return false;
+    }
     setIsAutoUploading(true);
     setStatus(null);
     updateQueueItem(item.id, { localStatus: "processing" });
@@ -1025,10 +1122,20 @@ export default function UploadPage() {
     setIsSubmitting(true);
     setStatus(null);
 
+    const normalizedFilename =
+      activeQueueFilename && !validateMediaFilename(values.filename).ok
+        ? activeQueueFilename
+        : values.filename;
+    const payload: UploadFormValues =
+      normalizedFilename === values.filename ? values : { ...values, filename: normalizedFilename };
+    if (normalizedFilename !== values.filename) {
+      setValues((current) => ({ ...current, filename: normalizedFilename }));
+    }
+
     const response = await fetch("/api/upload", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(values),
+      body: JSON.stringify(payload),
     });
 
     const data = (await response.json()) as UploadResponse;
@@ -1142,11 +1249,23 @@ export default function UploadPage() {
                 {queue.map((item) => (
                   <div
                     key={item.id}
-                    className={`rounded-xl border p-2 ${
-                      activeQueueId === item.id ? "border-slate-900" : "border-slate-300"
+                    className={`relative rounded-xl border p-2 transition ${
+                      activeQueueId === item.id
+                        ? "border-blue-700 bg-blue-50 shadow-sm ring-2 ring-blue-300"
+                        : "border-slate-300"
                     }`}
                   >
-                    <button type="button" onClick={() => setActiveQueueId(item.id)} className="w-full text-left">
+                    {activeQueueId === item.id ? (
+                      <span className="absolute right-2 top-2 z-10 rounded-full bg-blue-700 px-2 py-0.5 text-[10px] font-semibold text-white">
+                        Selected
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => setActiveQueueId(item.id)}
+                      aria-pressed={activeQueueId === item.id}
+                      className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    >
                       {item.mediaKind === "image" ? (
                         <Image
                           src={item.objectUrl}
@@ -1196,6 +1315,11 @@ export default function UploadPage() {
                 ))}
               </div>
             </div>
+          ) : null}
+          {queue.length > 0 ? (
+            <p className="mt-2 text-xs font-medium text-blue-700">
+              Selected file: {activeQueueItem ? activeQueueItem.file.name : "none"}
+            </p>
           ) : null}
           {queue.length > 0 ? (
             <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
@@ -1557,7 +1681,7 @@ export default function UploadPage() {
             value={values.title}
             onChange={(event) => setValue("title", event.target.value)}
             placeholder="Image title"
-            className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+            className={`rounded-xl border border-slate-300 px-3 py-2 text-sm ${aiFieldClass("title")}`}
           />
           <input
             required
@@ -1573,7 +1697,7 @@ export default function UploadPage() {
             value={values.eventName}
             onChange={(event) => setValue("eventName", event.target.value)}
             placeholder="Event name"
-            className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+            className={`rounded-xl border border-slate-300 px-3 py-2 text-sm ${aiFieldClass("eventName")}`}
           />
           <input
             required
@@ -1581,7 +1705,7 @@ export default function UploadPage() {
             value={values.location}
             onChange={(event) => setValue("location", event.target.value)}
             placeholder="Location (City, State)"
-            className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+            className={`rounded-xl border border-slate-300 px-3 py-2 text-sm ${aiFieldClass("location")}`}
           />
           <input
             required
@@ -1589,7 +1713,7 @@ export default function UploadPage() {
             value={values.eventSlug}
             onChange={(event) => setValue("eventSlug", event.target.value)}
             placeholder="Event slug (e.g., city-marathon-2026)"
-            className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+            className={`rounded-xl border border-slate-300 px-3 py-2 text-sm ${aiFieldClass("eventSlug")}`}
           />
           <input
             required
@@ -1597,7 +1721,7 @@ export default function UploadPage() {
             type="datetime-local"
             value={values.capturedAt}
             onChange={(event) => setValue("capturedAt", event.target.value)}
-            className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+            className={`rounded-xl border border-slate-300 px-3 py-2 text-sm ${aiFieldClass("capturedAt")}`}
           />
           <input
             required
@@ -1627,8 +1751,16 @@ export default function UploadPage() {
             value={values.filename}
             onChange={(event) => setValue("filename", event.target.value)}
             placeholder="Well-named filename"
-            className="rounded-xl border border-slate-300 px-3 py-2 text-sm md:col-span-2"
+            readOnly={Boolean(activeQueueFilename)}
+            className={`rounded-xl border border-slate-300 px-3 py-2 text-sm md:col-span-2 ${
+              activeQueueFilename ? "bg-slate-100 text-slate-600" : ""
+            }`}
           />
+          {activeQueueFilename ? (
+            <p className="-mt-1 text-xs text-slate-500 md:col-span-2">
+              Filename is locked to the selected queued file to preserve naming validation.
+            </p>
+          ) : null}
           <input
             name="previewUrl"
             value={values.previewUrl}
@@ -1655,7 +1787,7 @@ export default function UploadPage() {
             value={values.tags}
             onChange={(event) => setValue("tags", event.target.value)}
             placeholder="Comma-separated tags (e.g., red-carpet, keynote, finish-line)"
-            className="rounded-xl border border-slate-300 px-3 py-2 text-sm md:col-span-2"
+            className={`rounded-xl border border-slate-300 px-3 py-2 text-sm md:col-span-2 ${aiFieldClass("tags")}`}
             rows={3}
           />
           <textarea
@@ -1663,7 +1795,7 @@ export default function UploadPage() {
             value={values.attendeeKeywords}
             onChange={(event) => setValue("attendeeKeywords", event.target.value)}
             placeholder="Attendee-friendly keywords (e.g., bib-4481, table-a3, guest-lastname)"
-            className="rounded-xl border border-slate-300 px-3 py-2 text-sm md:col-span-2"
+            className={`rounded-xl border border-slate-300 px-3 py-2 text-sm md:col-span-2 ${aiFieldClass("attendeeKeywords")}`}
             rows={2}
           />
           <button
