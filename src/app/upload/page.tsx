@@ -203,6 +203,10 @@ export default function UploadPage() {
   const [latestAiSuggestion, setLatestAiSuggestion] = useState<LatestAiSuggestion | null>(null);
   const [aiHighlightedFields, setAiHighlightedFields] = useState<(keyof UploadFormValues)[]>([]);
   const aiHighlightTimeoutRef = useRef<number | null>(null);
+  const [clickedQueueCueId, setClickedQueueCueId] = useState<string | null>(null);
+  const queueClickCueTimeoutRef = useRef<number | null>(null);
+  const [applyToFormClicked, setApplyToFormClicked] = useState(false);
+  const applyToFormCueTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -266,6 +270,12 @@ export default function UploadPage() {
     () => () => {
       if (aiHighlightTimeoutRef.current) {
         window.clearTimeout(aiHighlightTimeoutRef.current);
+      }
+      if (queueClickCueTimeoutRef.current) {
+        window.clearTimeout(queueClickCueTimeoutRef.current);
+      }
+      if (applyToFormCueTimeoutRef.current) {
+        window.clearTimeout(applyToFormCueTimeoutRef.current);
       }
       for (const item of queueRef.current) URL.revokeObjectURL(item.objectUrl);
     },
@@ -374,6 +384,14 @@ export default function UploadPage() {
           ? `Applied AI suggestions to ${changedFields.length} field(s).`
           : "Applied AI suggestions (no field values changed).",
     });
+    setApplyToFormClicked(true);
+    if (applyToFormCueTimeoutRef.current) {
+      window.clearTimeout(applyToFormCueTimeoutRef.current);
+    }
+    applyToFormCueTimeoutRef.current = window.setTimeout(() => {
+      setApplyToFormClicked(false);
+      applyToFormCueTimeoutRef.current = null;
+    }, 900);
   };
 
   const applyLatestAiToBatchDefaults = () => {
@@ -691,6 +709,18 @@ export default function UploadPage() {
     event.preventDefault();
     const dropped = Array.from(event.dataTransfer.files);
     addFilesToQueue(dropped);
+  };
+
+  const selectQueueItemWithCue = (id: string) => {
+    setActiveQueueId(id);
+    setClickedQueueCueId(id);
+    if (queueClickCueTimeoutRef.current) {
+      window.clearTimeout(queueClickCueTimeoutRef.current);
+    }
+    queueClickCueTimeoutRef.current = window.setTimeout(() => {
+      setClickedQueueCueId(null);
+      queueClickCueTimeoutRef.current = null;
+    }, 550);
   };
 
   const canDecodeImageFile = async (file: File) => {
@@ -1253,7 +1283,7 @@ export default function UploadPage() {
                       activeQueueId === item.id
                         ? "border-blue-700 bg-blue-50 shadow-sm ring-2 ring-blue-300"
                         : "border-slate-300"
-                    }`}
+                    } ${clickedQueueCueId === item.id ? "scale-[1.01] ring-4 ring-emerald-300" : ""}`}
                   >
                     {activeQueueId === item.id ? (
                       <span className="absolute right-2 top-2 z-10 rounded-full bg-blue-700 px-2 py-0.5 text-[10px] font-semibold text-white">
@@ -1262,7 +1292,7 @@ export default function UploadPage() {
                     ) : null}
                     <button
                       type="button"
-                      onClick={() => setActiveQueueId(item.id)}
+                      onClick={() => selectQueueItemWithCue(item.id)}
                       aria-pressed={activeQueueId === item.id}
                       className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
@@ -1599,9 +1629,13 @@ export default function UploadPage() {
                   <button
                     type="button"
                     onClick={applyLatestAiToForm}
-                    className="rounded-lg bg-blue-700 px-2.5 py-1 text-xs font-semibold text-white"
+                    className={`rounded-lg px-2.5 py-1 text-xs font-semibold text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                      applyToFormClicked
+                        ? "bg-emerald-600"
+                        : "bg-blue-700 hover:bg-blue-800 active:bg-blue-900"
+                    }`}
                   >
-                    Apply to form
+                    {applyToFormClicked ? "Applied" : "Apply to form"}
                   </button>
                   <button
                     type="button"
