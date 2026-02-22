@@ -1079,7 +1079,7 @@ export default function UploadPage() {
             type="file"
             accept="image/jpeg,image/jpg,image/png,image/webp,video/mp4,video/quicktime,video/x-m4v,video/webm,audio/wav,audio/x-wav"
             className="mt-3 block w-full text-sm text-slate-700"
-            disabled={isAutoUploading || (role !== "PHOTOGRAPHER" && role !== "ADMIN")}
+            disabled={isAutoUploading}
             multiple
             onChange={(event) => {
               const files = event.target.files ? Array.from(event.target.files) : [];
