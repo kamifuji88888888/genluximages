@@ -442,7 +442,7 @@ export async function detectSubjectNameFromCard(args: {
           content: [
             {
               type: "input_text",
-              text: "Detect whether the image includes a visible name slate/name board/dry erase board (or paper name card) associated with the subject. Extract only the person name written on the board/card. Return JSON only.",
+              text: "You are reading event photos. Detect small whiteboards/name slates/name boards/dry erase boards/paper cards held near the subject. Extract the most likely PERSON NAME written on the slate, even when handwriting is imperfect. Return JSON only.",
             },
           ],
         },
@@ -462,11 +462,12 @@ export async function detectSubjectNameFromCard(args: {
             type: "object",
             additionalProperties: false,
             properties: {
-              hasNameCard: { type: "boolean" },
-              detectedName: { type: "string" },
+              boardVisible: { type: "boolean" },
+              rawBoardText: { type: "string" },
+              candidatePersonName: { type: "string" },
               confidence: { type: "number", minimum: 0, maximum: 1 },
             },
-            required: ["hasNameCard", "detectedName", "confidence"],
+            required: ["boardVisible", "rawBoardText", "candidatePersonName", "confidence"],
           },
           strict: true,
         },
@@ -477,14 +478,17 @@ export async function detectSubjectNameFromCard(args: {
   const data = (await response.json()) as { output_text?: string };
   if (!data.output_text) return { confidence: 0, source: "none" };
   const parsed = JSON.parse(data.output_text) as {
-    hasNameCard: boolean;
-    detectedName: string;
+    boardVisible: boolean;
+    rawBoardText: string;
+    candidatePersonName: string;
     confidence: number;
   };
-  const name = normalizeDetectedNameCandidate(parsed.detectedName || "");
-  if (!parsed.hasNameCard || !name) return { confidence: 0, source: "none" };
+  const name = normalizeDetectedNameCandidate(
+    parsed.candidatePersonName || parsed.rawBoardText || "",
+  );
+  if (!parsed.boardVisible && !name) return { confidence: 0, source: "none" };
   return {
-    subjectName: name,
+    subjectName: name || undefined,
     confidence: Math.max(0, Math.min(1, parsed.confidence || 0)),
     source: "card",
   };

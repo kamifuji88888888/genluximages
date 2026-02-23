@@ -411,12 +411,12 @@ export async function POST(request: NextRequest) {
         slateCandidateName = bestCardResult.subjectName;
         slateConfidence = bestCardResult.confidence;
         slateMessage =
-          bestCardResult.confidence >= 0.72
+          bestCardResult.confidence >= 0.62
             ? "Slate/card name detected with high confidence."
             : "Slate/card text found but confidence is below auto-apply threshold.";
       }
 
-      if (bestCardResult.subjectName && bestCardResult.confidence >= 0.72) {
+      if (bestCardResult.subjectName && bestCardResult.confidence >= 0.62) {
         subjectName = bestCardResult.subjectName;
         subjectSource = "card";
         subjectConfidence = bestCardResult.confidence;
