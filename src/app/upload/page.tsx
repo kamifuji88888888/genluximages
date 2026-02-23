@@ -41,6 +41,12 @@ type UploadAutomationResponse = {
       voiceTranscriptMessage?: string;
       voiceTitleCandidate?: string;
       voiceTitleApplied?: boolean;
+      slateDetected?: boolean;
+      slateCandidateName?: string;
+      slateConfidence?: number;
+      slateApplied?: boolean;
+      slateDetectionPass?: "none" | "full_frame" | "focused_center" | "focused_lower";
+      slateMessage?: string;
       subjectName?: string;
       subjectSource?: "none" | "card" | "match";
       subjectConfidence?: number;
@@ -72,6 +78,12 @@ type LatestAiSuggestion = {
   voiceTranscriptMessage: string;
   voiceTitleCandidate: string;
   voiceTitleApplied: boolean;
+  slateDetected: boolean;
+  slateCandidateName: string;
+  slateConfidence: number;
+  slateApplied: boolean;
+  slateDetectionPass: "none" | "full_frame" | "focused_center" | "focused_lower";
+  slateMessage: string;
   subjectName: string;
   subjectSource: "none" | "card" | "match";
   subjectConfidence: number;
@@ -377,6 +389,18 @@ export default function UploadPage() {
         return "missing API key";
       default:
         return "not provided";
+    }
+  };
+  const slateDetectionPassLabel = (pass: LatestAiSuggestion["slateDetectionPass"]) => {
+    switch (pass) {
+      case "full_frame":
+        return "full frame";
+      case "focused_center":
+        return "focused center crop";
+      case "focused_lower":
+        return "focused lower crop";
+      default:
+        return "not run";
     }
   };
 
@@ -1106,6 +1130,12 @@ export default function UploadPage() {
       voiceTranscriptMessage: data.data?.suggestions?.voiceTranscriptMessage || "",
       voiceTitleCandidate: data.data?.suggestions?.voiceTitleCandidate || "",
       voiceTitleApplied: data.data?.suggestions?.voiceTitleApplied ?? false,
+      slateDetected: data.data?.suggestions?.slateDetected ?? false,
+      slateCandidateName: data.data?.suggestions?.slateCandidateName || "",
+      slateConfidence: data.data?.suggestions?.slateConfidence ?? 0,
+      slateApplied: data.data?.suggestions?.slateApplied ?? false,
+      slateDetectionPass: data.data?.suggestions?.slateDetectionPass || "none",
+      slateMessage: data.data?.suggestions?.slateMessage || "",
       subjectName: data.data?.suggestions?.subjectName || "",
       subjectSource: data.data?.suggestions?.subjectSource || "none",
       subjectConfidence: data.data?.suggestions?.subjectConfidence ?? 0,
@@ -1732,6 +1762,39 @@ export default function UploadPage() {
                     {latestAiSuggestion.voiceTitleApplied ? "yes" : "no"}
                   </span>
                 </p>
+              </div>
+              <div className="mt-2 rounded-lg border border-fuchsia-200 bg-white/70 p-2 text-[11px] text-fuchsia-900">
+                <p>
+                  Slate/card detected:{" "}
+                  <span className="font-semibold">
+                    {latestAiSuggestion.slateDetected ? "yes" : "no"}
+                  </span>
+                </p>
+                <p>
+                  Candidate name:{" "}
+                  <span className="font-semibold">
+                    {latestAiSuggestion.slateCandidateName || "(none)"}
+                  </span>
+                </p>
+                <p>
+                  Confidence:{" "}
+                  <span className="font-semibold">
+                    {Math.round((latestAiSuggestion.slateConfidence || 0) * 100)}%
+                  </span>
+                </p>
+                <p>
+                  OCR pass:{" "}
+                  <span className="font-semibold">
+                    {slateDetectionPassLabel(latestAiSuggestion.slateDetectionPass)}
+                  </span>
+                </p>
+                <p>
+                  Applied to title:{" "}
+                  <span className="font-semibold">
+                    {latestAiSuggestion.slateApplied ? "yes" : "no"}
+                  </span>
+                </p>
+                <p>{latestAiSuggestion.slateMessage || "Slate/card OCR status unavailable."}</p>
               </div>
               <p className="mt-2 text-[11px] text-blue-800">
                 title: {latestAiSuggestion.title || "(none)"} | event:{" "}

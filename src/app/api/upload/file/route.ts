@@ -208,6 +208,7 @@ export async function POST(request: NextRequest) {
   const filenameSuggestion = parseCatalogFilename(originalName);
   let aiImageDataUrl: string | undefined;
   let subjectDetectionImageDataUrl: string | undefined;
+  const focusedSlateImageDataUrls: Array<{ pass: "focused_center" | "focused_lower"; imageDataUrl: string }> = [];
   try {
     const aiImageBuffer = await sharp(inputBytes)
       .resize({
@@ -230,9 +231,59 @@ export async function POST(request: NextRequest) {
       .jpeg({ quality: 82 })
       .toBuffer();
     subjectDetectionImageDataUrl = `data:image/jpeg;base64,${subjectBuffer.toString("base64")}`;
+
+    const originalWidth = metadata.width ?? 0;
+    const originalHeight = metadata.height ?? 0;
+    if (originalWidth > 0 && originalHeight > 0) {
+      const cropPlans: Array<{
+        pass: "focused_center" | "focused_lower";
+        leftRatio: number;
+        topRatio: number;
+        widthRatio: number;
+        heightRatio: number;
+      }> = [
+        {
+          pass: "focused_center",
+          leftRatio: 0.18,
+          topRatio: 0.2,
+          widthRatio: 0.64,
+          heightRatio: 0.62,
+        },
+        {
+          pass: "focused_lower",
+          leftRatio: 0.2,
+          topRatio: 0.38,
+          widthRatio: 0.6,
+          heightRatio: 0.5,
+        },
+      ];
+
+      for (const plan of cropPlans) {
+        const left = Math.max(0, Math.floor(originalWidth * plan.leftRatio));
+        const top = Math.max(0, Math.floor(originalHeight * plan.topRatio));
+        const width = Math.max(32, Math.floor(originalWidth * plan.widthRatio));
+        const height = Math.max(32, Math.floor(originalHeight * plan.heightRatio));
+        if (left + width > originalWidth || top + height > originalHeight) continue;
+        const croppedBuffer = await sharp(inputBytes)
+          .extract({ left, top, width, height })
+          .resize({
+            width: 1400,
+            height: 1400,
+            fit: "inside",
+            withoutEnlargement: false,
+          })
+          .jpeg({ quality: 85 })
+          .toBuffer();
+        focusedSlateImageDataUrls.push({
+          pass: plan.pass,
+          imageDataUrl: `data:image/jpeg;base64,${croppedBuffer.toString("base64")}`,
+        });
+      }
+    }
   } catch {
     aiImageDataUrl = undefined;
     subjectDetectionImageDataUrl = undefined;
+    focusedSlateImageDataUrls.length = 0;
   }
   const matchedVoiceNote = voiceNote instanceof File && voiceNote.size > 0 ? voiceNote : null;
   const voiceNoteMatched = Boolean(matchedVoiceNote);
@@ -274,16 +325,50 @@ export async function POST(request: NextRequest) {
   let subjectName = "";
   let subjectSource: "none" | "card" | "match" = "none";
   let subjectConfidence = 0;
+  let slateDetected = false;
+  let slateCandidateName = "";
+  let slateConfidence = 0;
+  let slateApplied = false;
+  let slateDetectionPass: "none" | "full_frame" | "focused_center" | "focused_lower" = "none";
+  let slateMessage = "No slate/card name detected.";
   if (autoApplySubjectMatches && subjectDetectionImageDataUrl) {
     try {
-      const cardResult = await detectSubjectNameFromCard({
+      let bestCardResult = await detectSubjectNameFromCard({
         filename: originalName,
         imageDataUrl: subjectDetectionImageDataUrl,
       });
-      if (cardResult.subjectName && cardResult.confidence >= 0.72) {
-        subjectName = cardResult.subjectName;
+      slateDetectionPass = "full_frame";
+
+      for (const focused of focusedSlateImageDataUrls) {
+        if (bestCardResult.subjectName && bestCardResult.confidence >= 0.72) break;
+        const focusedResult = await detectSubjectNameFromCard({
+          filename: originalName,
+          imageDataUrl: focused.imageDataUrl,
+        });
+        if (
+          focusedResult.subjectName &&
+          (!bestCardResult.subjectName || focusedResult.confidence > bestCardResult.confidence)
+        ) {
+          bestCardResult = focusedResult;
+          slateDetectionPass = focused.pass;
+        }
+      }
+
+      if (bestCardResult.subjectName) {
+        slateDetected = true;
+        slateCandidateName = bestCardResult.subjectName;
+        slateConfidence = bestCardResult.confidence;
+        slateMessage =
+          bestCardResult.confidence >= 0.72
+            ? "Slate/card name detected with high confidence."
+            : "Slate/card text found but confidence is below auto-apply threshold.";
+      }
+
+      if (bestCardResult.subjectName && bestCardResult.confidence >= 0.72) {
+        subjectName = bestCardResult.subjectName;
         subjectSource = "card";
-        subjectConfidence = cardResult.confidence;
+        subjectConfidence = bestCardResult.confidence;
+        slateApplied = true;
         upsertKnownSubjectForEvent({
           uploaderEmail: session.email,
           eventSlug: eventSlugForSubjects,
@@ -309,7 +394,15 @@ export async function POST(request: NextRequest) {
       subjectName = "";
       subjectSource = "none";
       subjectConfidence = 0;
+      slateDetected = false;
+      slateCandidateName = "";
+      slateConfidence = 0;
+      slateApplied = false;
+      slateDetectionPass = "none";
+      slateMessage = "Slate/card OCR step failed.";
     }
+  } else if (!autoApplySubjectMatches) {
+    slateMessage = "Slate/card detection is disabled (auto-apply subject matches is off).";
   }
   if (subjectName) {
     aiSuggestion = {
@@ -355,6 +448,12 @@ export async function POST(request: NextRequest) {
         voiceTitleApplied:
           Boolean(voiceTitleCandidate) &&
           aiSuggestion.suggestedTitle?.toLowerCase() === voiceTitleCandidate.toLowerCase(),
+        slateDetected,
+        slateCandidateName,
+        slateConfidence,
+        slateApplied,
+        slateDetectionPass,
+        slateMessage,
         subjectName: subjectName || "",
         subjectSource,
         subjectConfidence,
