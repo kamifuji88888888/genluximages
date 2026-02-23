@@ -206,9 +206,16 @@ export async function POST(request: NextRequest) {
   const fullResUrl = `${origin}/uploads/full/${outputName}`;
   const storageKey = `local/uploads/full/${outputName}`;
   const filenameSuggestion = parseCatalogFilename(originalName);
+  type SlatePassName =
+    | "full_frame"
+    | "focused_center"
+    | "focused_lower"
+    | "whiteboard_enhanced_full"
+    | "whiteboard_enhanced_center"
+    | "whiteboard_enhanced_lower";
+  const slatePassInputs: Array<{ pass: SlatePassName; imageDataUrl: string }> = [];
   let aiImageDataUrl: string | undefined;
   let subjectDetectionImageDataUrl: string | undefined;
-  const focusedSlateImageDataUrls: Array<{ pass: "focused_center" | "focused_lower"; imageDataUrl: string }> = [];
   try {
     const aiImageBuffer = await sharp(inputBytes)
       .resize({
@@ -231,12 +238,34 @@ export async function POST(request: NextRequest) {
       .jpeg({ quality: 82 })
       .toBuffer();
     subjectDetectionImageDataUrl = `data:image/jpeg;base64,${subjectBuffer.toString("base64")}`;
+    slatePassInputs.push({
+      pass: "full_frame",
+      imageDataUrl: subjectDetectionImageDataUrl,
+    });
+
+    const enhancedFullBuffer = await sharp(inputBytes)
+      .resize({
+        width: 1280,
+        height: 1280,
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .normalise()
+      .modulate({ brightness: 1.06, saturation: 0.9 })
+      .sharpen({ sigma: 1.1, m1: 1, m2: 2, x1: 2, y2: 10, y3: 20 })
+      .jpeg({ quality: 84 })
+      .toBuffer();
+    slatePassInputs.push({
+      pass: "whiteboard_enhanced_full",
+      imageDataUrl: `data:image/jpeg;base64,${enhancedFullBuffer.toString("base64")}`,
+    });
 
     const originalWidth = metadata.width ?? 0;
     const originalHeight = metadata.height ?? 0;
     if (originalWidth > 0 && originalHeight > 0) {
       const cropPlans: Array<{
         pass: "focused_center" | "focused_lower";
+        enhancedPass: "whiteboard_enhanced_center" | "whiteboard_enhanced_lower";
         leftRatio: number;
         topRatio: number;
         widthRatio: number;
@@ -244,6 +273,7 @@ export async function POST(request: NextRequest) {
       }> = [
         {
           pass: "focused_center",
+          enhancedPass: "whiteboard_enhanced_center",
           leftRatio: 0.18,
           topRatio: 0.2,
           widthRatio: 0.64,
@@ -251,6 +281,7 @@ export async function POST(request: NextRequest) {
         },
         {
           pass: "focused_lower",
+          enhancedPass: "whiteboard_enhanced_lower",
           leftRatio: 0.2,
           topRatio: 0.38,
           widthRatio: 0.6,
@@ -274,16 +305,27 @@ export async function POST(request: NextRequest) {
           })
           .jpeg({ quality: 85 })
           .toBuffer();
-        focusedSlateImageDataUrls.push({
+        slatePassInputs.push({
           pass: plan.pass,
           imageDataUrl: `data:image/jpeg;base64,${croppedBuffer.toString("base64")}`,
+        });
+
+        const enhancedCropBuffer = await sharp(croppedBuffer)
+          .normalise()
+          .modulate({ brightness: 1.08, saturation: 0.85 })
+          .sharpen({ sigma: 1.2, m1: 1, m2: 2, x1: 2, y2: 10, y3: 20 })
+          .jpeg({ quality: 86 })
+          .toBuffer();
+        slatePassInputs.push({
+          pass: plan.enhancedPass,
+          imageDataUrl: `data:image/jpeg;base64,${enhancedCropBuffer.toString("base64")}`,
         });
       }
     }
   } catch {
     aiImageDataUrl = undefined;
     subjectDetectionImageDataUrl = undefined;
-    focusedSlateImageDataUrls.length = 0;
+    slatePassInputs.length = 0;
   }
   const matchedVoiceNote = voiceNote instanceof File && voiceNote.size > 0 ? voiceNote : null;
   const voiceNoteMatched = Boolean(matchedVoiceNote);
@@ -329,30 +371,40 @@ export async function POST(request: NextRequest) {
   let slateCandidateName = "";
   let slateConfidence = 0;
   let slateApplied = false;
-  let slateDetectionPass: "none" | "full_frame" | "focused_center" | "focused_lower" = "none";
+  let slateDetectionPass: "none" | SlatePassName = "none";
   let slateMessage = "No slate/card name detected.";
-  if (autoApplySubjectMatches && subjectDetectionImageDataUrl) {
+  const slatePasses: Array<{
+    pass: SlatePassName;
+    detected: boolean;
+    candidateName: string;
+    confidence: number;
+  }> = [];
+  if (autoApplySubjectMatches && slatePassInputs.length > 0 && subjectDetectionImageDataUrl) {
     try {
-      let bestCardResult = await detectSubjectNameFromCard({
-        filename: originalName,
-        imageDataUrl: subjectDetectionImageDataUrl,
-      });
-      slateDetectionPass = "full_frame";
+      let bestCardResult: Awaited<ReturnType<typeof detectSubjectNameFromCard>> = {
+        confidence: 0,
+        source: "none",
+      };
+      let bestCardPass: SlatePassName = "full_frame";
 
-      for (const focused of focusedSlateImageDataUrls) {
-        if (bestCardResult.subjectName && bestCardResult.confidence >= 0.72) break;
-        const focusedResult = await detectSubjectNameFromCard({
+      for (const candidatePass of slatePassInputs) {
+        const passResult = await detectSubjectNameFromCard({
           filename: originalName,
-          imageDataUrl: focused.imageDataUrl,
+          imageDataUrl: candidatePass.imageDataUrl,
         });
-        if (
-          focusedResult.subjectName &&
-          (!bestCardResult.subjectName || focusedResult.confidence > bestCardResult.confidence)
-        ) {
-          bestCardResult = focusedResult;
-          slateDetectionPass = focused.pass;
+        slatePasses.push({
+          pass: candidatePass.pass,
+          detected: Boolean(passResult.subjectName),
+          candidateName: passResult.subjectName || "",
+          confidence: passResult.confidence || 0,
+        });
+        if (!passResult.subjectName) continue;
+        if (!bestCardResult.subjectName || passResult.confidence > bestCardResult.confidence) {
+          bestCardResult = passResult;
+          bestCardPass = candidatePass.pass;
         }
       }
+      slateDetectionPass = bestCardResult.subjectName ? bestCardPass : "none";
 
       if (bestCardResult.subjectName) {
         slateDetected = true;
@@ -403,6 +455,8 @@ export async function POST(request: NextRequest) {
     }
   } else if (!autoApplySubjectMatches) {
     slateMessage = "Slate/card detection is disabled (auto-apply subject matches is off).";
+  } else {
+    slateMessage = "Slate/card OCR inputs were not generated from this image.";
   }
   if (subjectName) {
     aiSuggestion = {
@@ -454,6 +508,7 @@ export async function POST(request: NextRequest) {
         slateApplied,
         slateDetectionPass,
         slateMessage,
+        slatePasses,
         subjectName: subjectName || "",
         subjectSource,
         subjectConfidence,

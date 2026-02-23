@@ -10,6 +10,15 @@ type UploadResponse = {
   message: string;
 };
 
+type SlateDetectionPass =
+  | "none"
+  | "full_frame"
+  | "focused_center"
+  | "focused_lower"
+  | "whiteboard_enhanced_full"
+  | "whiteboard_enhanced_center"
+  | "whiteboard_enhanced_lower";
+
 type UploadAutomationResponse = {
   ok: boolean;
   message: string;
@@ -45,8 +54,14 @@ type UploadAutomationResponse = {
       slateCandidateName?: string;
       slateConfidence?: number;
       slateApplied?: boolean;
-      slateDetectionPass?: "none" | "full_frame" | "focused_center" | "focused_lower";
+      slateDetectionPass?: SlateDetectionPass;
       slateMessage?: string;
+      slatePasses?: Array<{
+        pass: Exclude<SlateDetectionPass, "none">;
+        detected: boolean;
+        candidateName: string;
+        confidence: number;
+      }>;
       subjectName?: string;
       subjectSource?: "none" | "card" | "match";
       subjectConfidence?: number;
@@ -82,8 +97,14 @@ type LatestAiSuggestion = {
   slateCandidateName: string;
   slateConfidence: number;
   slateApplied: boolean;
-  slateDetectionPass: "none" | "full_frame" | "focused_center" | "focused_lower";
+  slateDetectionPass: SlateDetectionPass;
   slateMessage: string;
+  slatePasses: Array<{
+    pass: Exclude<SlateDetectionPass, "none">;
+    detected: boolean;
+    candidateName: string;
+    confidence: number;
+  }>;
   subjectName: string;
   subjectSource: "none" | "card" | "match";
   subjectConfidence: number;
@@ -399,6 +420,12 @@ export default function UploadPage() {
         return "focused center crop";
       case "focused_lower":
         return "focused lower crop";
+      case "whiteboard_enhanced_full":
+        return "whiteboard enhanced full";
+      case "whiteboard_enhanced_center":
+        return "whiteboard enhanced center";
+      case "whiteboard_enhanced_lower":
+        return "whiteboard enhanced lower";
       default:
         return "not run";
     }
@@ -1136,6 +1163,7 @@ export default function UploadPage() {
       slateApplied: data.data?.suggestions?.slateApplied ?? false,
       slateDetectionPass: data.data?.suggestions?.slateDetectionPass || "none",
       slateMessage: data.data?.suggestions?.slateMessage || "",
+      slatePasses: data.data?.suggestions?.slatePasses || [],
       subjectName: data.data?.suggestions?.subjectName || "",
       subjectSource: data.data?.suggestions?.subjectSource || "none",
       subjectConfidence: data.data?.suggestions?.subjectConfidence ?? 0,
@@ -1795,6 +1823,18 @@ export default function UploadPage() {
                   </span>
                 </p>
                 <p>{latestAiSuggestion.slateMessage || "Slate/card OCR status unavailable."}</p>
+                {latestAiSuggestion.slatePasses.length > 0 ? (
+                  <div className="mt-1 rounded border border-fuchsia-100 bg-white/70 p-1.5">
+                    <p className="font-semibold">Pass diagnostics</p>
+                    {latestAiSuggestion.slatePasses.map((pass) => (
+                      <p key={pass.pass}>
+                        {slateDetectionPassLabel(pass.pass)}: {pass.detected ? "detected" : "none"} ·{" "}
+                        {Math.round((pass.confidence || 0) * 100)}%
+                        {pass.candidateName ? ` · ${pass.candidateName}` : ""}
+                      </p>
+                    ))}
+                  </div>
+                ) : null}
               </div>
               <p className="mt-2 text-[11px] text-blue-800">
                 title: {latestAiSuggestion.title || "(none)"} | event:{" "}
