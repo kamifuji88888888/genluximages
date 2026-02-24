@@ -422,22 +422,6 @@ export async function POST(request: NextRequest) {
         heightRatio: number;
       }> = [
         {
-          pass: "focused_center",
-          enhancedPass: "whiteboard_enhanced_center",
-          leftRatio: 0.18,
-          topRatio: 0.2,
-          widthRatio: 0.64,
-          heightRatio: 0.62,
-        },
-        {
-          pass: "focused_lower",
-          enhancedPass: "whiteboard_enhanced_lower",
-          leftRatio: 0.2,
-          topRatio: 0.38,
-          widthRatio: 0.6,
-          heightRatio: 0.5,
-        },
-        {
           pass: "focused_tight_center",
           enhancedPass: "whiteboard_enhanced_tight_center",
           leftRatio: 0.24,
@@ -452,6 +436,14 @@ export async function POST(request: NextRequest) {
           topRatio: 0.2,
           widthRatio: 0.46,
           heightRatio: 0.4,
+        },
+        {
+          pass: "focused_center",
+          enhancedPass: "whiteboard_enhanced_center",
+          leftRatio: 0.18,
+          topRatio: 0.2,
+          widthRatio: 0.64,
+          heightRatio: 0.62,
         },
       ];
       if (scanRegion) {
@@ -575,7 +567,29 @@ export async function POST(request: NextRequest) {
         let bestCardPass: SlatePassName = "full_frame";
         const passResults: SlatePassResult[] = [];
 
-        for (const candidatePass of slatePassInputs) {
+        const modelPassPriority: SlatePassName[] = [
+          "full_frame",
+          "whiteboard_enhanced_full",
+          "focused_board_candidate",
+          "whiteboard_enhanced_board_candidate",
+          "whiteboard_enhanced_board_candidate_threshold",
+          "focused_tight_center",
+          "whiteboard_enhanced_tight_center",
+          "whiteboard_enhanced_tight_center_threshold",
+          "focused_tight_left",
+          "whiteboard_enhanced_tight_left",
+          "whiteboard_enhanced_tight_left_threshold",
+          "focused_center",
+          "whiteboard_enhanced_center",
+          "whiteboard_enhanced_center_threshold",
+        ];
+        const passMap = new Map(slatePassInputs.map((entry) => [entry.pass, entry]));
+        const orderedPasses = modelPassPriority
+          .map((pass) => passMap.get(pass))
+          .filter((entry): entry is { pass: SlatePassName; imageDataUrl: string } => Boolean(entry))
+          .slice(0, 8);
+
+        for (const candidatePass of orderedPasses) {
           const passResult = await detectSubjectNameFromCard({
             filename: originalName,
             imageDataUrl: candidatePass.imageDataUrl,
@@ -630,13 +644,12 @@ export async function POST(request: NextRequest) {
           "whiteboard_enhanced_tight_left_threshold",
           "whiteboard_enhanced_tight_left",
           "focused_tight_left",
+          "whiteboard_enhanced_center_threshold",
           "whiteboard_enhanced_center",
           "focused_center",
-          "whiteboard_enhanced_lower",
-          "focused_lower",
           "whiteboard_enhanced_full",
           "full_frame",
-        ];
+        ].slice(0, 8);
         const passInputMap = new Map(slatePassInputs.map((entry) => [entry.pass, entry.imageDataUrl]));
         const rescueModel = fallbackSlateModel || primarySlateModel;
         let rescueBest: { name: string; confidence: number; pass: SlatePassName } | null = null;
@@ -669,7 +682,7 @@ export async function POST(request: NextRequest) {
           slateFallbackAttempted = slateFallbackAttempted || Boolean(fallbackSlateModel);
         } else {
           // Final fallback: run local OCR text extraction on top candidate passes.
-          const localOcrPriority = rescuePassPriority.slice(0, 8);
+          const localOcrPriority = rescuePassPriority.slice(0, 3);
           for (const pass of localOcrPriority) {
             const imageDataUrl = passInputMap.get(pass);
             if (!imageDataUrl) continue;
