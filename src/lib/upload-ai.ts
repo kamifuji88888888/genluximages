@@ -495,6 +495,80 @@ export async function detectSubjectNameFromCard(args: {
   };
 }
 
+export async function rescueBoardNameFromText(args: {
+  filename: string;
+  imageDataUrl?: string;
+  modelOverride?: string;
+}): Promise<{ candidateName?: string; rawBoardText?: string; confidence: number }> {
+  if (!args.imageDataUrl) return { confidence: 0 };
+  if ((process.env.AI_UPLOAD_PROVIDER || "").toLowerCase() !== "openai") return { confidence: 0 };
+  const apiKey = process.env.OPENAI_API_KEY || "";
+  if (!apiKey) return { confidence: 0 };
+  const model = args.modelOverride || process.env.AI_UPLOAD_MODEL || "gpt-4.1-mini";
+
+  const response = await fetchWithTimeout("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      input: [
+        {
+          role: "system",
+          content: [
+            {
+              type: "input_text",
+              text: "Transcribe any visible text from a small whiteboard/name slate/card in this photo. Then infer a likely person name from the transcribed text when possible. Return JSON only.",
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: `Filename: ${args.filename}` },
+            { type: "input_image", image_url: args.imageDataUrl },
+          ],
+        },
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "board_text_rescue",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              rawBoardText: { type: "string" },
+              candidatePersonName: { type: "string" },
+              confidence: { type: "number", minimum: 0, maximum: 1 },
+            },
+            required: ["rawBoardText", "candidatePersonName", "confidence"],
+          },
+          strict: true,
+        },
+      },
+    }),
+  });
+  if (!response.ok) return { confidence: 0 };
+  const data = (await response.json()) as { output_text?: string };
+  if (!data.output_text) return { confidence: 0 };
+  const parsed = JSON.parse(data.output_text) as {
+    rawBoardText: string;
+    candidatePersonName: string;
+    confidence: number;
+  };
+  const candidateName = normalizeDetectedNameCandidate(
+    parsed.candidatePersonName || parsed.rawBoardText || "",
+  );
+  return {
+    candidateName: candidateName || undefined,
+    rawBoardText: (parsed.rawBoardText || "").trim() || undefined,
+    confidence: Math.max(0, Math.min(1, parsed.confidence || 0)),
+  };
+}
+
 export async function matchSubjectAgainstKnown(args: {
   imageDataUrl?: string;
   knownSubjects: KnownSubjectReference[];

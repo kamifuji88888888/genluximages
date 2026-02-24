@@ -10,6 +10,7 @@ import {
   detectSubjectNameFromCard,
   extractTitleFromVoiceTranscript,
   matchSubjectAgainstKnown,
+  rescueBoardNameFromText,
   suggestUploadMetadata,
   transcribeVoiceNoteDetailed,
 } from "@/lib/upload-ai";
@@ -439,6 +440,48 @@ export async function POST(request: NextRequest) {
       const bestCardPass = selected.bestCardPass;
       slateDetectionPass = bestCardResult.subjectName ? bestCardPass : "none";
 
+      if (!bestCardResult.subjectName) {
+        const rescuePassPriority: SlatePassName[] = [
+          "whiteboard_enhanced_center",
+          "focused_center",
+          "whiteboard_enhanced_lower",
+          "focused_lower",
+          "whiteboard_enhanced_full",
+          "full_frame",
+        ];
+        const passInputMap = new Map(slatePassInputs.map((entry) => [entry.pass, entry.imageDataUrl]));
+        const rescueModel = fallbackSlateModel || primarySlateModel;
+        let rescueBest: { name: string; confidence: number; pass: SlatePassName } | null = null;
+        for (const pass of rescuePassPriority) {
+          const imageDataUrl = passInputMap.get(pass);
+          if (!imageDataUrl) continue;
+          const rescue = await rescueBoardNameFromText({
+            filename: originalName,
+            imageDataUrl,
+            modelOverride: rescueModel,
+          });
+          slatePasses.push({
+            pass,
+            model: `${rescueModel} (rescue)`,
+            detected: Boolean(rescue.candidateName),
+            candidateName: rescue.candidateName || rescue.rawBoardText || "",
+            confidence: rescue.confidence || 0,
+          });
+          if (!rescue.candidateName) continue;
+          if (!rescueBest || rescue.confidence > rescueBest.confidence) {
+            rescueBest = { name: rescue.candidateName, confidence: rescue.confidence, pass };
+          }
+        }
+        if (rescueBest) {
+          slateDetectionPass = rescueBest.pass;
+          slateDetected = true;
+          slateCandidateName = rescueBest.name;
+          slateConfidence = Math.max(0.62, rescueBest.confidence);
+          slateModelUsed = rescueModel;
+          slateFallbackAttempted = slateFallbackAttempted || Boolean(fallbackSlateModel);
+        }
+      }
+
       if (bestCardResult.subjectName) {
         slateDetected = true;
         slateCandidateName = bestCardResult.subjectName;
@@ -447,14 +490,18 @@ export async function POST(request: NextRequest) {
           bestCardResult.confidence >= 0.62
             ? `Slate/card name detected with high confidence (${slateModelUsed || primarySlateModel}).`
             : "Slate/card text found but confidence is below auto-apply threshold.";
+      } else if (slateDetected) {
+        slateMessage = `Slate/card name recovered via OCR text rescue (${slateModelUsed || primarySlateModel}).`;
       } else if (slateFallbackAttempted) {
         slateMessage = "No slate/card name detected after primary + fallback model passes.";
       }
 
-      if (bestCardResult.subjectName && bestCardResult.confidence >= 0.62) {
-        subjectName = bestCardResult.subjectName;
+      const finalCardName = slateCandidateName || bestCardResult.subjectName || "";
+      const finalCardConfidence = Math.max(slateConfidence, bestCardResult.confidence || 0);
+      if (finalCardName && finalCardConfidence >= 0.62) {
+        subjectName = finalCardName;
         subjectSource = "card";
-        subjectConfidence = bestCardResult.confidence;
+        subjectConfidence = finalCardConfidence;
         slateApplied = true;
         upsertKnownSubjectForEvent({
           uploaderEmail: session.email,
