@@ -25,6 +25,84 @@ function sanitizeFilename(name: string) {
   return name.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function detectWhiteboardCandidateRegion(args: {
+  grayscale: Buffer;
+  width: number;
+  height: number;
+  sourceWidth: number;
+  sourceHeight: number;
+}) {
+  const { grayscale, width, height, sourceWidth, sourceHeight } = args;
+  if (width < 40 || height < 40 || sourceWidth < 40 || sourceHeight < 40) return null;
+
+  const windowSizes = [
+    { wRatio: 0.38, hRatio: 0.28 },
+    { wRatio: 0.3, hRatio: 0.24 },
+    { wRatio: 0.26, hRatio: 0.2 },
+  ];
+
+  let best:
+    | {
+        x: number;
+        y: number;
+        w: number;
+        h: number;
+        score: number;
+      }
+    | null = null;
+
+  for (const size of windowSizes) {
+    const winW = Math.max(18, Math.floor(width * size.wRatio));
+    const winH = Math.max(14, Math.floor(height * size.hRatio));
+    if (winW >= width || winH >= height) continue;
+    const stepX = Math.max(4, Math.floor(winW * 0.22));
+    const stepY = Math.max(4, Math.floor(winH * 0.22));
+    const yStart = Math.max(0, Math.floor(height * 0.08));
+    const yEnd = Math.max(yStart + 1, Math.floor(height * 0.78) - winH);
+
+    for (let y = yStart; y <= yEnd; y += stepY) {
+      for (let x = 0; x <= width - winW; x += stepX) {
+        let sum = 0;
+        let sumSq = 0;
+        let count = 0;
+        for (let yy = y; yy < y + winH; yy++) {
+          const rowOffset = yy * width;
+          for (let xx = x; xx < x + winW; xx++) {
+            const value = grayscale[rowOffset + xx] || 0;
+            sum += value;
+            sumSq += value * value;
+            count++;
+          }
+        }
+        if (count === 0) continue;
+        const mean = sum / count;
+        const variance = Math.max(0, sumSq / count - mean * mean);
+        const stdDev = Math.sqrt(variance);
+        // Prefer bright windows that still contain ink/text variance.
+        const score = mean + stdDev * 1.25;
+        if (!best || score > best.score) {
+          best = { x, y, w: winW, h: winH, score };
+        }
+      }
+    }
+  }
+
+  if (!best) return null;
+
+  const scaleX = sourceWidth / width;
+  const scaleY = sourceHeight / height;
+  const left = clamp(Math.floor(best.x * scaleX), 0, sourceWidth - 1);
+  const top = clamp(Math.floor(best.y * scaleY), 0, sourceHeight - 1);
+  const candidateWidth = clamp(Math.floor(best.w * scaleX), 32, sourceWidth - left);
+  const candidateHeight = clamp(Math.floor(best.h * scaleY), 32, sourceHeight - top);
+  if (candidateWidth < 32 || candidateHeight < 32) return null;
+  return { left, top, width: candidateWidth, height: candidateHeight };
+}
+
 export async function POST(request: NextRequest) {
   const session = decodeSession(request.cookies.get(SESSION_COOKIE_NAME)?.value ?? null);
   if (!session || (session.role !== "PHOTOGRAPHER" && session.role !== "ADMIN")) {
@@ -265,6 +343,24 @@ export async function POST(request: NextRequest) {
     const originalWidth = metadata.width ?? 0;
     const originalHeight = metadata.height ?? 0;
     if (originalWidth > 0 && originalHeight > 0) {
+      const scanMeta = await sharp(inputBytes)
+        .resize({
+          width: 320,
+          height: 320,
+          fit: "inside",
+          withoutEnlargement: true,
+        })
+        .greyscale()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      const scanRegion = detectWhiteboardCandidateRegion({
+        grayscale: scanMeta.data,
+        width: scanMeta.info.width,
+        height: scanMeta.info.height,
+        sourceWidth: originalWidth,
+        sourceHeight: originalHeight,
+      });
+
       const cropPlans: Array<{
         pass: string;
         enhancedPass: string;
@@ -306,6 +402,16 @@ export async function POST(request: NextRequest) {
           heightRatio: 0.4,
         },
       ];
+      if (scanRegion) {
+        cropPlans.unshift({
+          pass: "focused_board_candidate",
+          enhancedPass: "whiteboard_enhanced_board_candidate",
+          leftRatio: scanRegion.left / originalWidth,
+          topRatio: scanRegion.top / originalHeight,
+          widthRatio: scanRegion.width / originalWidth,
+          heightRatio: scanRegion.height / originalHeight,
+        });
+      }
 
       for (const plan of cropPlans) {
         const left = Math.max(0, Math.floor(originalWidth * plan.leftRatio));
@@ -463,6 +569,9 @@ export async function POST(request: NextRequest) {
 
       if (!bestCardResult.subjectName) {
         const rescuePassPriority: SlatePassName[] = [
+          "whiteboard_enhanced_board_candidate_threshold",
+          "whiteboard_enhanced_board_candidate",
+          "focused_board_candidate",
           "whiteboard_enhanced_tight_center_threshold",
           "whiteboard_enhanced_tight_center",
           "focused_tight_center",
