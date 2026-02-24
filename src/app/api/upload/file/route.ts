@@ -29,6 +29,58 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function dataUrlToBuffer(dataUrl: string) {
+  const base64Marker = "base64,";
+  const markerIndex = dataUrl.indexOf(base64Marker);
+  if (markerIndex === -1) return null;
+  const payload = dataUrl.slice(markerIndex + base64Marker.length);
+  if (!payload) return null;
+  return Buffer.from(payload, "base64");
+}
+
+function pickNameFromOcrText(raw: string) {
+  const cleaned = raw
+    .replace(/[|\\/_~`]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+
+  const lines = raw
+    .split("\n")
+    .map((line) => line.replace(/[^a-zA-Z\s'-]/g, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const candidates = [...lines, cleaned];
+  const stop = new Set(["name", "subject", "guest", "talent", "board", "slate"]);
+  for (const candidate of candidates) {
+    const parts = candidate
+      .split(" ")
+      .map((part) => part.trim())
+      .filter((part) => /^[a-zA-Z][a-zA-Z'-]{1,}$/.test(part))
+      .filter((part) => !stop.has(part.toLowerCase()))
+      .slice(0, 3);
+    if (parts.length < 2) continue;
+    return parts
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+      .join(" ");
+  }
+  return "";
+}
+
+async function runLocalBoardOcrNameRescue(imageDataUrl: string) {
+  const imageBuffer = dataUrlToBuffer(imageDataUrl);
+  if (!imageBuffer) return { candidateName: "", confidence: 0, rawText: "" };
+  try {
+    const { recognize } = await import("tesseract.js");
+    const result = await recognize(imageBuffer, "eng");
+    const text = result.data?.text?.trim() || "";
+    const candidateName = pickNameFromOcrText(text);
+    const confidence = candidateName ? Math.max(0, (result.data?.confidence || 0) / 100) : 0;
+    return { candidateName, confidence, rawText: text };
+  } catch {
+    return { candidateName: "", confidence: 0, rawText: "" };
+  }
+}
+
 function detectWhiteboardCandidateRegion(args: {
   grayscale: Buffer;
   width: number;
@@ -615,6 +667,28 @@ export async function POST(request: NextRequest) {
           slateConfidence = Math.max(0.62, rescueBest.confidence);
           slateModelUsed = rescueModel;
           slateFallbackAttempted = slateFallbackAttempted || Boolean(fallbackSlateModel);
+        } else {
+          // Final fallback: run local OCR text extraction on top candidate passes.
+          const localOcrPriority = rescuePassPriority.slice(0, 8);
+          for (const pass of localOcrPriority) {
+            const imageDataUrl = passInputMap.get(pass);
+            if (!imageDataUrl) continue;
+            const localRescue = await runLocalBoardOcrNameRescue(imageDataUrl);
+            slatePasses.push({
+              pass,
+              model: "local-ocr (tesseract)",
+              detected: Boolean(localRescue.candidateName),
+              candidateName: localRescue.candidateName || localRescue.rawText || "",
+              confidence: localRescue.confidence || 0,
+            });
+            if (!localRescue.candidateName) continue;
+            slateDetectionPass = pass;
+            slateDetected = true;
+            slateCandidateName = localRescue.candidateName;
+            slateConfidence = Math.max(0.62, localRescue.confidence);
+            slateModelUsed = "local-ocr (tesseract)";
+            break;
+          }
         }
       }
 
