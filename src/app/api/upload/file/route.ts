@@ -29,6 +29,11 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function isTruthyEnv(value: string | undefined) {
+  const normalized = (value || "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
 function dataUrlToBuffer(dataUrl: string) {
   const base64Marker = "base64,";
   const markerIndex = dataUrl.indexOf(base64Marker);
@@ -680,7 +685,7 @@ export async function POST(request: NextRequest) {
           slateConfidence = Math.max(0.62, rescueBest.confidence);
           slateModelUsed = rescueModel;
           slateFallbackAttempted = slateFallbackAttempted || Boolean(fallbackSlateModel);
-        } else {
+        } else if (isTruthyEnv(process.env.AI_UPLOAD_ENABLE_LOCAL_OCR)) {
           // Final fallback: run local OCR text extraction on top candidate passes.
           const localOcrPriority = rescuePassPriority.slice(0, 3);
           for (const pass of localOcrPriority) {
