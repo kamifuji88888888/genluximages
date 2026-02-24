@@ -419,6 +419,7 @@ export async function transcribeVoiceNote(voiceFile: File): Promise<string | und
 export async function detectSubjectNameFromCard(args: {
   filename: string;
   imageDataUrl?: string;
+  modelOverride?: string;
 }): Promise<SubjectDetectionResult> {
   if (!args.imageDataUrl) return { confidence: 0, source: "none" };
   if ((process.env.AI_UPLOAD_PROVIDER || "").toLowerCase() !== "openai") {
@@ -426,7 +427,7 @@ export async function detectSubjectNameFromCard(args: {
   }
   const apiKey = process.env.OPENAI_API_KEY || "";
   if (!apiKey) return { confidence: 0, source: "none" };
-  const model = process.env.AI_UPLOAD_MODEL || "gpt-4.1-mini";
+  const model = args.modelOverride || process.env.AI_UPLOAD_MODEL || "gpt-4.1-mini";
 
   const response = await fetchWithTimeout("https://api.openai.com/v1/responses", {
     method: "POST",

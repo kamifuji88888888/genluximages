@@ -55,9 +55,12 @@ type UploadAutomationResponse = {
       slateConfidence?: number;
       slateApplied?: boolean;
       slateDetectionPass?: SlateDetectionPass;
+      slateModelUsed?: string;
+      slateFallbackAttempted?: boolean;
       slateMessage?: string;
       slatePasses?: Array<{
         pass: Exclude<SlateDetectionPass, "none">;
+        model: string;
         detected: boolean;
         candidateName: string;
         confidence: number;
@@ -98,9 +101,12 @@ type LatestAiSuggestion = {
   slateConfidence: number;
   slateApplied: boolean;
   slateDetectionPass: SlateDetectionPass;
+  slateModelUsed: string;
+  slateFallbackAttempted: boolean;
   slateMessage: string;
   slatePasses: Array<{
     pass: Exclude<SlateDetectionPass, "none">;
+    model: string;
     detected: boolean;
     candidateName: string;
     confidence: number;
@@ -1162,6 +1168,8 @@ export default function UploadPage() {
       slateConfidence: data.data?.suggestions?.slateConfidence ?? 0,
       slateApplied: data.data?.suggestions?.slateApplied ?? false,
       slateDetectionPass: data.data?.suggestions?.slateDetectionPass || "none",
+      slateModelUsed: data.data?.suggestions?.slateModelUsed || "",
+      slateFallbackAttempted: data.data?.suggestions?.slateFallbackAttempted ?? false,
       slateMessage: data.data?.suggestions?.slateMessage || "",
       slatePasses: data.data?.suggestions?.slatePasses || [],
       subjectName: data.data?.suggestions?.subjectName || "",
@@ -1817,6 +1825,18 @@ export default function UploadPage() {
                   </span>
                 </p>
                 <p>
+                  Model used:{" "}
+                  <span className="font-semibold">
+                    {latestAiSuggestion.slateModelUsed || "(none)"}
+                  </span>
+                </p>
+                <p>
+                  Fallback attempted:{" "}
+                  <span className="font-semibold">
+                    {latestAiSuggestion.slateFallbackAttempted ? "yes" : "no"}
+                  </span>
+                </p>
+                <p>
                   Applied to title:{" "}
                   <span className="font-semibold">
                     {latestAiSuggestion.slateApplied ? "yes" : "no"}
@@ -1827,9 +1847,9 @@ export default function UploadPage() {
                   <div className="mt-1 rounded border border-fuchsia-100 bg-white/70 p-1.5">
                     <p className="font-semibold">Pass diagnostics</p>
                     {latestAiSuggestion.slatePasses.map((pass) => (
-                      <p key={pass.pass}>
+                      <p key={`${pass.pass}-${pass.model}`}>
                         {slateDetectionPassLabel(pass.pass)}: {pass.detected ? "detected" : "none"} ·{" "}
-                        {Math.round((pass.confidence || 0) * 100)}%
+                        {Math.round((pass.confidence || 0) * 100)}% · {pass.model}
                         {pass.candidateName ? ` · ${pass.candidateName}` : ""}
                       </p>
                     ))}

@@ -213,6 +213,13 @@ export async function POST(request: NextRequest) {
     | "whiteboard_enhanced_full"
     | "whiteboard_enhanced_center"
     | "whiteboard_enhanced_lower";
+  type SlatePassResult = {
+    pass: SlatePassName;
+    model: string;
+    detected: boolean;
+    candidateName: string;
+    confidence: number;
+  };
   const slatePassInputs: Array<{ pass: SlatePassName; imageDataUrl: string }> = [];
   let aiImageDataUrl: string | undefined;
   let subjectDetectionImageDataUrl: string | undefined;
@@ -372,38 +379,64 @@ export async function POST(request: NextRequest) {
   let slateConfidence = 0;
   let slateApplied = false;
   let slateDetectionPass: "none" | SlatePassName = "none";
+  let slateModelUsed = "";
+  let slateFallbackAttempted = false;
   let slateMessage = "No slate/card name detected.";
-  const slatePasses: Array<{
-    pass: SlatePassName;
-    detected: boolean;
-    candidateName: string;
-    confidence: number;
-  }> = [];
+  const slatePasses: SlatePassResult[] = [];
+  const primarySlateModel = (process.env.AI_UPLOAD_MODEL || "gpt-4.1-mini").trim();
+  const fallbackSlateModel = (process.env.AI_UPLOAD_SLATE_FALLBACK_MODEL || "").trim();
   if (autoApplySubjectMatches && slatePassInputs.length > 0 && subjectDetectionImageDataUrl) {
     try {
-      let bestCardResult: Awaited<ReturnType<typeof detectSubjectNameFromCard>> = {
-        confidence: 0,
-        source: "none",
-      };
-      let bestCardPass: SlatePassName = "full_frame";
+      const runSlatePasses = async (model: string) => {
+        let bestCardResult: Awaited<ReturnType<typeof detectSubjectNameFromCard>> = {
+          confidence: 0,
+          source: "none",
+        };
+        let bestCardPass: SlatePassName = "full_frame";
+        const passResults: SlatePassResult[] = [];
 
-      for (const candidatePass of slatePassInputs) {
-        const passResult = await detectSubjectNameFromCard({
-          filename: originalName,
-          imageDataUrl: candidatePass.imageDataUrl,
-        });
-        slatePasses.push({
-          pass: candidatePass.pass,
-          detected: Boolean(passResult.subjectName),
-          candidateName: passResult.subjectName || "",
-          confidence: passResult.confidence || 0,
-        });
-        if (!passResult.subjectName) continue;
-        if (!bestCardResult.subjectName || passResult.confidence > bestCardResult.confidence) {
-          bestCardResult = passResult;
-          bestCardPass = candidatePass.pass;
+        for (const candidatePass of slatePassInputs) {
+          const passResult = await detectSubjectNameFromCard({
+            filename: originalName,
+            imageDataUrl: candidatePass.imageDataUrl,
+            modelOverride: model,
+          });
+          passResults.push({
+            pass: candidatePass.pass,
+            model,
+            detected: Boolean(passResult.subjectName),
+            candidateName: passResult.subjectName || "",
+            confidence: passResult.confidence || 0,
+          });
+          if (!passResult.subjectName) continue;
+          if (!bestCardResult.subjectName || passResult.confidence > bestCardResult.confidence) {
+            bestCardResult = passResult;
+            bestCardPass = candidatePass.pass;
+          }
+        }
+        return { bestCardResult, bestCardPass, passResults };
+      };
+
+      let selected = await runSlatePasses(primarySlateModel);
+      slatePasses.push(...selected.passResults);
+      slateModelUsed = primarySlateModel;
+
+      const shouldUseFallback =
+        !selected.bestCardResult.subjectName &&
+        Boolean(fallbackSlateModel) &&
+        fallbackSlateModel !== primarySlateModel;
+      if (shouldUseFallback) {
+        slateFallbackAttempted = true;
+        const fallbackRun = await runSlatePasses(fallbackSlateModel);
+        slatePasses.push(...fallbackRun.passResults);
+        if (fallbackRun.bestCardResult.subjectName) {
+          selected = fallbackRun;
+          slateModelUsed = fallbackSlateModel;
         }
       }
+
+      const bestCardResult = selected.bestCardResult;
+      const bestCardPass = selected.bestCardPass;
       slateDetectionPass = bestCardResult.subjectName ? bestCardPass : "none";
 
       if (bestCardResult.subjectName) {
@@ -412,8 +445,10 @@ export async function POST(request: NextRequest) {
         slateConfidence = bestCardResult.confidence;
         slateMessage =
           bestCardResult.confidence >= 0.62
-            ? "Slate/card name detected with high confidence."
+            ? `Slate/card name detected with high confidence (${slateModelUsed || primarySlateModel}).`
             : "Slate/card text found but confidence is below auto-apply threshold.";
+      } else if (slateFallbackAttempted) {
+        slateMessage = "No slate/card name detected after primary + fallback model passes.";
       }
 
       if (bestCardResult.subjectName && bestCardResult.confidence >= 0.62) {
@@ -451,6 +486,8 @@ export async function POST(request: NextRequest) {
       slateConfidence = 0;
       slateApplied = false;
       slateDetectionPass = "none";
+      slateModelUsed = "";
+      slateFallbackAttempted = false;
       slateMessage = "Slate/card OCR step failed.";
     }
   } else if (!autoApplySubjectMatches) {
@@ -507,6 +544,8 @@ export async function POST(request: NextRequest) {
         slateConfidence,
         slateApplied,
         slateDetectionPass,
+        slateModelUsed,
+        slateFallbackAttempted,
         slateMessage,
         slatePasses,
         subjectName: subjectName || "",
