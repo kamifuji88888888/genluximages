@@ -263,6 +263,19 @@ export default function UploadPage() {
   const queueClickCueTimeoutRef = useRef<number | null>(null);
   const [applyToFormClicked, setApplyToFormClicked] = useState(false);
   const applyToFormCueTimeoutRef = useRef<number | null>(null);
+  const [slateSelectMode, setSlateSelectMode] = useState(false);
+  const [slateSelectBox, setSlateSelectBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [slateSelectImageSize, setSlateSelectImageSize] = useState<{
+    displayW: number;
+    displayH: number;
+    naturalW: number;
+    naturalH: number;
+  } | null>(null);
+  const [manualSlateOcrStatus, setManualSlateOcrStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [manualSlateOcrMessage, setManualSlateOcrMessage] = useState("");
+  const slateSelectDragRef = useRef<{ startX: number; startY: number } | null>(null);
+  const slateSelectImgRef = useRef<HTMLImageElement | null>(null);
+  const slateSelectOverlayRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -280,6 +293,15 @@ export default function UploadPage() {
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
+
+  useEffect(() => {
+    if (!slateSelectMode) return;
+    const onWindowMouseUp = () => {
+      slateSelectDragRef.current = null;
+    };
+    window.addEventListener("mouseup", onWindowMouseUp);
+    return () => window.removeEventListener("mouseup", onWindowMouseUp);
+  }, [slateSelectMode]);
 
   const refreshPresets = async () => {
     const response = await fetch("/api/upload/presets");
@@ -1043,6 +1065,82 @@ export default function UploadPage() {
       setIsCloudUploading(false);
     }
     return true;
+  };
+
+  const runManualSlateOcr = async () => {
+    const item = activeQueueItem;
+    if (!item || item.mediaKind !== "image" || !slateSelectBox || !slateSelectImageSize || !slateSelectImgRef.current) {
+      setManualSlateOcrMessage("Select a region first by dragging on the image.");
+      setManualSlateOcrStatus("error");
+      return;
+    }
+    const { displayW, displayH, naturalW, naturalH } = slateSelectImageSize;
+    const { x, y, w, h } = slateSelectBox;
+    if (w < 10 || h < 10) {
+      setManualSlateOcrMessage("Selection too small. Draw a larger box around the slate.");
+      setManualSlateOcrStatus("error");
+      return;
+    }
+    const sx = Math.max(0, (x / displayW) * naturalW);
+    const sy = Math.max(0, (y / displayH) * naturalH);
+    const sw = Math.min(naturalW - sx, (w / displayW) * naturalW);
+    const sh = Math.min(naturalH - sy, (h / displayH) * naturalH);
+    if (sw < 10 || sh < 10) {
+      setManualSlateOcrMessage("Selection too small.");
+      setManualSlateOcrStatus("error");
+      return;
+    }
+    setManualSlateOcrStatus("loading");
+    setManualSlateOcrMessage("");
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(sw);
+      canvas.height = Math.round(sh);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas 2d not available");
+      ctx.drawImage(slateSelectImgRef.current, sx, sy, sw, sh, 0, 0, sw, sh);
+      const blob = await new Promise<Blob | null>((resolve) =>
+        canvas.toBlob((b) => resolve(b), "image/png", 0.95)
+      );
+      if (!blob) throw new Error("Failed to create crop image");
+      const formData = new FormData();
+      formData.append("image", blob, "slate-crop.png");
+      const response = await fetch("/api/upload/ocr-region", { method: "POST", body: formData });
+      const result = (await response.json()) as {
+        ok: boolean;
+        candidateName?: string;
+        rawText?: string;
+        message?: string;
+      };
+      if (!result.ok) {
+        setManualSlateOcrMessage(result.message || "OCR request failed");
+        setManualSlateOcrStatus("error");
+        return;
+      }
+      const candidateName = result.candidateName?.trim() || "";
+      if (candidateName) {
+        setValues((prev) => ({ ...prev, title: candidateName }));
+        setLatestAiSuggestion((prev) =>
+          prev
+            ? {
+                ...prev,
+                slateCandidateName: candidateName,
+                slateDetected: true,
+                slateApplied: true,
+                slateConfidence: 0.9,
+                title: candidateName,
+              }
+            : null
+        );
+        setManualSlateOcrMessage(`Applied "${candidateName}" to title.`);
+      } else {
+        setManualSlateOcrMessage(result.rawText ? "No name found in selected region." : "No text detected.");
+      }
+      setManualSlateOcrStatus("done");
+    } catch (e) {
+      setManualSlateOcrMessage(e instanceof Error ? e.message : "OCR failed");
+      setManualSlateOcrStatus("error");
+    }
   };
 
   const handleAutoUpload = async (item: QueueItem) => {
@@ -1864,6 +1962,21 @@ export default function UploadPage() {
                     ))}
                   </div>
                 ) : null}
+                {!latestAiSuggestion.slateDetected && activeQueueItem?.mediaKind === "image" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSlateSelectMode(true);
+                      setSlateSelectBox(null);
+                      setSlateSelectImageSize(null);
+                      setManualSlateOcrStatus("idle");
+                      setManualSlateOcrMessage("");
+                    }}
+                    className="mt-2 rounded-lg border border-fuchsia-400 bg-fuchsia-50 px-2 py-1.5 text-xs font-semibold text-fuchsia-800 hover:bg-fuchsia-100"
+                  >
+                    Select slate region (draw box)
+                  </button>
+                ) : null}
               </div>
               <p className="mt-2 text-[11px] text-blue-800">
                 title: {latestAiSuggestion.title || "(none)"} | event:{" "}
@@ -2067,6 +2180,122 @@ export default function UploadPage() {
         >
           {status.message}
         </p>
+      ) : null}
+
+      {slateSelectMode && activeQueueItem?.mediaKind === "image" ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Select slate region"
+        >
+          <div className="flex max-h-[90vh] max-w-4xl flex-col rounded-xl border border-slate-300 bg-white p-3 shadow-xl">
+            <p className="mb-2 text-sm font-semibold text-slate-800">
+              Draw a box around the name slate, then run OCR
+            </p>
+            <div className="relative inline-block max-w-full self-center">
+              <img
+                ref={slateSelectImgRef}
+                src={activeQueueItem.objectUrl}
+                alt="Select region"
+                className="block max-h-[70vh] max-w-full select-none"
+                draggable={false}
+                onLoad={() => {
+                  const img = slateSelectImgRef.current;
+                  if (!img) return;
+                  const rect = img.getBoundingClientRect();
+                  setSlateSelectImageSize({
+                    displayW: rect.width,
+                    displayH: rect.height,
+                    naturalW: img.naturalWidth,
+                    naturalH: img.naturalHeight,
+                  });
+                }}
+              />
+              <div
+                ref={slateSelectOverlayRef}
+                className="absolute inset-0 cursor-crosshair"
+                onMouseDown={(e) => {
+                  const el = slateSelectOverlayRef.current;
+                  if (!el) return;
+                  const rect = el.getBoundingClientRect();
+                  const x = e.clientX - rect.left;
+                  const y = e.clientY - rect.top;
+                  slateSelectDragRef.current = { startX: x, startY: y };
+                  setSlateSelectBox({ x, y, w: 0, h: 0 });
+                }}
+                onMouseMove={(e) => {
+                  if (!slateSelectDragRef.current) return;
+                  const el = slateSelectOverlayRef.current;
+                  if (!el) return;
+                  const rect = el.getBoundingClientRect();
+                  const x = e.clientX - rect.left;
+                  const y = e.clientY - rect.top;
+                  const { startX, startY } = slateSelectDragRef.current;
+                  const minX = Math.max(0, Math.min(startX, x));
+                  const minY = Math.max(0, Math.min(startY, y));
+                  const maxX = Math.min(rect.width, Math.max(startX, x));
+                  const maxY = Math.min(rect.height, Math.max(startY, y));
+                  setSlateSelectBox({
+                    x: minX,
+                    y: minY,
+                    w: maxX - minX,
+                    h: maxY - minY,
+                  });
+                }}
+                onMouseUp={() => {
+                  slateSelectDragRef.current = null;
+                }}
+                onMouseLeave={() => {
+                  slateSelectDragRef.current = null;
+                }}
+              />
+              {slateSelectBox && slateSelectBox.w > 0 && slateSelectBox.h > 0 ? (
+                <div
+                  className="pointer-events-none absolute border-2 border-blue-500 bg-blue-500/20"
+                  style={{
+                    left: slateSelectBox.x,
+                    top: slateSelectBox.y,
+                    width: slateSelectBox.w,
+                    height: slateSelectBox.h,
+                  }}
+                />
+              ) : null}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void runManualSlateOcr()}
+                disabled={manualSlateOcrStatus === "loading" || !slateSelectBox || slateSelectBox.w < 10 || slateSelectBox.h < 10}
+                className="rounded-lg bg-fuchsia-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-fuchsia-700 disabled:opacity-50"
+              >
+                {manualSlateOcrStatus === "loading" ? "Running OCR…" : "Run OCR on selection"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSlateSelectMode(false);
+                  setSlateSelectBox(null);
+                  setSlateSelectImageSize(null);
+                  setManualSlateOcrStatus("idle");
+                  setManualSlateOcrMessage("");
+                }}
+                className="rounded-lg border border-slate-400 bg-slate-100 px-3 py-1.5 text-sm font-semibold text-slate-700 hover:bg-slate-200"
+              >
+                Cancel
+              </button>
+              {manualSlateOcrMessage ? (
+                <span
+                  className={`text-sm ${
+                    manualSlateOcrStatus === "error" ? "text-red-600" : "text-slate-700"
+                  }`}
+                >
+                  {manualSlateOcrMessage}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   );
