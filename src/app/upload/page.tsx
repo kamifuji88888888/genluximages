@@ -10,14 +10,7 @@ type UploadResponse = {
   message: string;
 };
 
-type SlateDetectionPass =
-  | "none"
-  | "full_frame"
-  | "focused_center"
-  | "focused_lower"
-  | "whiteboard_enhanced_full"
-  | "whiteboard_enhanced_center"
-  | "whiteboard_enhanced_lower";
+type SlateDetectionPass = string;
 
 type UploadAutomationResponse = {
   ok: boolean;
@@ -426,14 +419,30 @@ export default function UploadPage() {
         return "focused center crop";
       case "focused_lower":
         return "focused lower crop";
+      case "focused_tight_center":
+        return "focused tight center";
+      case "focused_tight_left":
+        return "focused tight left";
       case "whiteboard_enhanced_full":
         return "whiteboard enhanced full";
       case "whiteboard_enhanced_center":
         return "whiteboard enhanced center";
       case "whiteboard_enhanced_lower":
         return "whiteboard enhanced lower";
+      case "whiteboard_enhanced_tight_center":
+        return "whiteboard enhanced tight center";
+      case "whiteboard_enhanced_tight_left":
+        return "whiteboard enhanced tight left";
+      case "whiteboard_enhanced_center_threshold":
+        return "whiteboard enhanced center threshold";
+      case "whiteboard_enhanced_lower_threshold":
+        return "whiteboard enhanced lower threshold";
+      case "whiteboard_enhanced_tight_center_threshold":
+        return "whiteboard enhanced tight center threshold";
+      case "whiteboard_enhanced_tight_left_threshold":
+        return "whiteboard enhanced tight left threshold";
       default:
-        return "not run";
+        return pass === "none" ? "not run" : pass.replaceAll("_", " ");
     }
   };
 
@@ -1725,7 +1734,7 @@ export default function UploadPage() {
             <div className="mt-3 rounded-xl border border-blue-200 bg-blue-50 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-xs font-semibold text-blue-900">
-                  AI draft suggestions ({latestAiSuggestion.source}, confidence{" "}
+                  AI draft suggestions ({latestAiSuggestion.source}, metadata confidence{" "}
                   {Math.round(latestAiSuggestion.confidence * 100)}%)
                 </p>
                 {latestAiSuggestion.voiceTranscript ? (

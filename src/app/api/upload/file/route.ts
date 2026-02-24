@@ -207,13 +207,7 @@ export async function POST(request: NextRequest) {
   const fullResUrl = `${origin}/uploads/full/${outputName}`;
   const storageKey = `local/uploads/full/${outputName}`;
   const filenameSuggestion = parseCatalogFilename(originalName);
-  type SlatePassName =
-    | "full_frame"
-    | "focused_center"
-    | "focused_lower"
-    | "whiteboard_enhanced_full"
-    | "whiteboard_enhanced_center"
-    | "whiteboard_enhanced_lower";
+  type SlatePassName = string;
   type SlatePassResult = {
     pass: SlatePassName;
     model: string;
@@ -243,9 +237,9 @@ export async function POST(request: NextRequest) {
         fit: "inside",
         withoutEnlargement: true,
       })
-      .jpeg({ quality: 82 })
+      .png()
       .toBuffer();
-    subjectDetectionImageDataUrl = `data:image/jpeg;base64,${subjectBuffer.toString("base64")}`;
+    subjectDetectionImageDataUrl = `data:image/png;base64,${subjectBuffer.toString("base64")}`;
     slatePassInputs.push({
       pass: "full_frame",
       imageDataUrl: subjectDetectionImageDataUrl,
@@ -261,19 +255,19 @@ export async function POST(request: NextRequest) {
       .normalise()
       .modulate({ brightness: 1.06, saturation: 0.9 })
       .sharpen({ sigma: 1.1, m1: 1, m2: 2, x1: 2, y2: 10, y3: 20 })
-      .jpeg({ quality: 84 })
+      .png()
       .toBuffer();
     slatePassInputs.push({
       pass: "whiteboard_enhanced_full",
-      imageDataUrl: `data:image/jpeg;base64,${enhancedFullBuffer.toString("base64")}`,
+      imageDataUrl: `data:image/png;base64,${enhancedFullBuffer.toString("base64")}`,
     });
 
     const originalWidth = metadata.width ?? 0;
     const originalHeight = metadata.height ?? 0;
     if (originalWidth > 0 && originalHeight > 0) {
       const cropPlans: Array<{
-        pass: "focused_center" | "focused_lower";
-        enhancedPass: "whiteboard_enhanced_center" | "whiteboard_enhanced_lower";
+        pass: string;
+        enhancedPass: string;
         leftRatio: number;
         topRatio: number;
         widthRatio: number;
@@ -295,6 +289,22 @@ export async function POST(request: NextRequest) {
           widthRatio: 0.6,
           heightRatio: 0.5,
         },
+        {
+          pass: "focused_tight_center",
+          enhancedPass: "whiteboard_enhanced_tight_center",
+          leftRatio: 0.24,
+          topRatio: 0.2,
+          widthRatio: 0.44,
+          heightRatio: 0.38,
+        },
+        {
+          pass: "focused_tight_left",
+          enhancedPass: "whiteboard_enhanced_tight_left",
+          leftRatio: 0.14,
+          topRatio: 0.2,
+          widthRatio: 0.46,
+          heightRatio: 0.4,
+        },
       ];
 
       for (const plan of cropPlans) {
@@ -306,27 +316,38 @@ export async function POST(request: NextRequest) {
         const croppedBuffer = await sharp(inputBytes)
           .extract({ left, top, width, height })
           .resize({
-            width: 1400,
-            height: 1400,
+            width: 1800,
+            height: 1800,
             fit: "inside",
             withoutEnlargement: false,
           })
-          .jpeg({ quality: 85 })
+          .png()
           .toBuffer();
         slatePassInputs.push({
           pass: plan.pass,
-          imageDataUrl: `data:image/jpeg;base64,${croppedBuffer.toString("base64")}`,
+          imageDataUrl: `data:image/png;base64,${croppedBuffer.toString("base64")}`,
         });
 
         const enhancedCropBuffer = await sharp(croppedBuffer)
           .normalise()
           .modulate({ brightness: 1.08, saturation: 0.85 })
           .sharpen({ sigma: 1.2, m1: 1, m2: 2, x1: 2, y2: 10, y3: 20 })
-          .jpeg({ quality: 86 })
+          .png()
           .toBuffer();
         slatePassInputs.push({
           pass: plan.enhancedPass,
-          imageDataUrl: `data:image/jpeg;base64,${enhancedCropBuffer.toString("base64")}`,
+          imageDataUrl: `data:image/png;base64,${enhancedCropBuffer.toString("base64")}`,
+        });
+
+        const thresholdCropBuffer = await sharp(enhancedCropBuffer)
+          .grayscale()
+          .normalise()
+          .threshold(165)
+          .png()
+          .toBuffer();
+        slatePassInputs.push({
+          pass: `${plan.enhancedPass}_threshold`,
+          imageDataUrl: `data:image/png;base64,${thresholdCropBuffer.toString("base64")}`,
         });
       }
     }
@@ -442,6 +463,12 @@ export async function POST(request: NextRequest) {
 
       if (!bestCardResult.subjectName) {
         const rescuePassPriority: SlatePassName[] = [
+          "whiteboard_enhanced_tight_center_threshold",
+          "whiteboard_enhanced_tight_center",
+          "focused_tight_center",
+          "whiteboard_enhanced_tight_left_threshold",
+          "whiteboard_enhanced_tight_left",
+          "focused_tight_left",
           "whiteboard_enhanced_center",
           "focused_center",
           "whiteboard_enhanced_lower",
