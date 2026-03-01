@@ -1,7 +1,11 @@
 /**
  * Shared slate/board OCR helpers: extract a candidate name from raw OCR text
- * and run Tesseract on an image buffer (used by upload file route and ocr-region API).
+ * and run OCR on an image buffer (Google Cloud Vision only; no Tesseract on server).
  */
+import {
+  isGoogleVisionConfigured,
+  runGoogleVisionOcr,
+} from "@/lib/google-vision-ocr";
 
 export function pickNameFromOcrText(raw: string): string {
   const cleaned = raw
@@ -33,14 +37,16 @@ export function pickNameFromOcrText(raw: string): string {
 
 export async function runOcrOnImageBuffer(
   imageBuffer: Buffer
-): Promise<{ candidateName: string; rawText: string }> {
+): Promise<{ candidateName: string; rawText: string; provider?: "google" | "tesseract" }> {
+  if (!isGoogleVisionConfigured()) {
+    return { candidateName: "", rawText: "" };
+  }
   try {
-    const { recognize } = await import("tesseract.js");
-    const result = await recognize(imageBuffer, "eng");
-    const text = result.data?.text?.trim() || "";
-    const candidateName = pickNameFromOcrText(text);
-    return { candidateName, rawText: text };
-  } catch {
+    const { rawText } = await runGoogleVisionOcr(imageBuffer);
+    const candidateName = pickNameFromOcrText(rawText);
+    return { candidateName, rawText, provider: "google" };
+  } catch (e) {
+    console.error("Google Vision OCR failed:", e);
     return { candidateName: "", rawText: "" };
   }
 }

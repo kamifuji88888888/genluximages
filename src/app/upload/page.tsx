@@ -1105,13 +1105,34 @@ export default function UploadPage() {
       if (!blob) throw new Error("Failed to create crop image");
       const formData = new FormData();
       formData.append("image", blob, "slate-crop.png");
-      const response = await fetch("/api/upload/ocr-region", { method: "POST", body: formData });
-      const result = (await response.json()) as {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30_000);
+      const response = await fetch("/api/upload/ocr-region", {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      const text = await response.text();
+      let result: {
         ok: boolean;
         candidateName?: string;
         rawText?: string;
         message?: string;
+        provider?: "google" | "tesseract";
       };
+      try {
+        result = JSON.parse(text) as typeof result;
+      } catch {
+        const gateway = response.status === 502 || response.status === 503 || response.status === 504;
+        setManualSlateOcrMessage(
+          gateway
+            ? `Server gateway error (${response.status}). The request may be timing out—check Railway logs and increase timeout if needed.`
+            : "Server returned an error page instead of JSON. Check Railway logs and that GOOGLE_CLOUD_VISION_API_KEY is valid."
+        );
+        setManualSlateOcrStatus("error");
+        return;
+      }
       if (!result.ok) {
         setManualSlateOcrMessage(result.message || "OCR request failed");
         setManualSlateOcrStatus("error");
@@ -1132,13 +1153,30 @@ export default function UploadPage() {
               }
             : null
         );
-        setManualSlateOcrMessage(`Applied "${candidateName}" to title.`);
+        setManualSlateOcrMessage(
+          result.provider === "google"
+            ? `Applied "${candidateName}" to title (Google Vision).`
+            : `Applied "${candidateName}" to title.`
+        );
       } else {
-        setManualSlateOcrMessage(result.rawText ? "No name found in selected region." : "No text detected.");
+        setManualSlateOcrMessage(
+          result.rawText
+            ? `No name parsed from region. Raw OCR: "${result.rawText.slice(0, 80)}${result.rawText.length > 80 ? "…" : ""}"`
+            : "No text detected."
+        );
       }
       setManualSlateOcrStatus("done");
     } catch (e) {
-      setManualSlateOcrMessage(e instanceof Error ? e.message : "OCR failed");
+      const isAbort = e instanceof Error && e.name === "AbortError";
+      const msg = e instanceof Error ? e.message : "";
+      const isNetwork = msg === "Failed to fetch" || msg.includes("fetch") || msg.includes("network");
+      const message =
+        isAbort
+          ? "OCR timed out (30s). Check that GOOGLE_CLOUD_VISION_API_KEY is set on Railway and try again."
+          : isNetwork
+            ? "Request failed. Check: (1) GOOGLE_CLOUD_VISION_API_KEY is set in Railway Variables, (2) you redeployed after adding it, (3) no ad-blocker is blocking the request."
+            : msg || "OCR failed";
+      setManualSlateOcrMessage(message);
       setManualSlateOcrStatus("error");
     }
   };
@@ -2192,6 +2230,9 @@ export default function UploadPage() {
           <div className="flex max-h-[90vh] max-w-4xl flex-col rounded-xl border border-slate-300 bg-white p-3 shadow-xl">
             <p className="mb-2 text-sm font-semibold text-slate-800">
               Draw a box around the name slate, then run OCR
+            </p>
+            <p className="mb-2 text-xs text-slate-500">
+              First run can take 30–60 seconds while the OCR engine loads.
             </p>
             <div className="relative inline-block max-w-full self-center">
               <img

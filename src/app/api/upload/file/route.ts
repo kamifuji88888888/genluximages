@@ -7,6 +7,10 @@ import { validateMediaFilename } from "@/lib/media-filename";
 import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
 import { getKnownSubjectsForEvent, upsertKnownSubjectForEvent } from "@/lib/subject-memory";
 import {
+  isGoogleVisionConfigured,
+  runOcrOnImageBuffer,
+} from "@/lib/slate-ocr";
+import {
   detectSubjectNameFromCard,
   extractTitleFromVoiceTranscript,
   matchSubjectAgainstKnown,
@@ -69,21 +73,6 @@ function pickNameFromOcrText(raw: string) {
       .join(" ");
   }
   return "";
-}
-
-async function runLocalBoardOcrNameRescue(imageDataUrl: string) {
-  const imageBuffer = dataUrlToBuffer(imageDataUrl);
-  if (!imageBuffer) return { candidateName: "", confidence: 0, rawText: "" };
-  try {
-    const { recognize } = await import("tesseract.js");
-    const result = await recognize(imageBuffer, "eng");
-    const text = result.data?.text?.trim() || "";
-    const candidateName = pickNameFromOcrText(text);
-    const confidence = candidateName ? Math.max(0, (result.data?.confidence || 0) / 100) : 0;
-    return { candidateName, confidence, rawText: text };
-  } catch {
-    return { candidateName: "", confidence: 0, rawText: "" };
-  }
 }
 
 function detectWhiteboardCandidateRegion(args: {
@@ -564,6 +553,34 @@ export async function POST(request: NextRequest) {
   const fallbackSlateModel = (process.env.AI_UPLOAD_SLATE_FALLBACK_MODEL || "").trim();
   if (autoApplySubjectMatches && slatePassInputs.length > 0 && subjectDetectionImageDataUrl) {
     try {
+      let googleSlateResult: { name: string } | null = null;
+      if (isGoogleVisionConfigured()) {
+        const fullImageBuffer = dataUrlToBuffer(subjectDetectionImageDataUrl);
+        if (fullImageBuffer) {
+          try {
+            const { candidateName, provider } = await runOcrOnImageBuffer(fullImageBuffer);
+            if (candidateName && provider === "google") {
+              googleSlateResult = { name: candidateName };
+              slateDetected = true;
+              slateCandidateName = candidateName;
+              slateConfidence = 0.9;
+              slateModelUsed = "google-vision (full image)";
+              slateDetectionPass = "full_frame";
+              slateMessage = "Slate name detected from full image (Google Vision).";
+              slatePasses.push({
+                pass: "full_frame",
+                model: "google-vision (full image)",
+                detected: true,
+                candidateName,
+                confidence: 0.9,
+              });
+            }
+          } catch (e) {
+            console.warn("Full-image Google Vision OCR failed, falling back to OpenAI passes:", e);
+          }
+        }
+      }
+
       const runSlatePasses = async (model: string) => {
         let bestCardResult: Awaited<ReturnType<typeof detectSubjectNameFromCard>> = {
           confidence: 0,
@@ -616,9 +633,26 @@ export async function POST(request: NextRequest) {
         return { bestCardResult, bestCardPass, passResults };
       };
 
-      let selected = await runSlatePasses(primarySlateModel);
-      slatePasses.push(...selected.passResults);
-      slateModelUsed = primarySlateModel;
+      let selected: {
+        bestCardResult: Awaited<ReturnType<typeof detectSubjectNameFromCard>>;
+        bestCardPass: SlatePassName;
+        passResults: SlatePassResult[];
+      };
+      if (googleSlateResult) {
+        selected = {
+          bestCardResult: {
+            subjectName: googleSlateResult.name,
+            confidence: 0.9,
+            source: "card",
+          },
+          bestCardPass: "full_frame",
+          passResults: [],
+        };
+      } else {
+        selected = await runSlatePasses(primarySlateModel);
+        slatePasses.push(...selected.passResults);
+        slateModelUsed = primarySlateModel;
+      }
 
       const shouldUseFallback =
         !selected.bestCardResult.subjectName &&
@@ -685,29 +719,9 @@ export async function POST(request: NextRequest) {
           slateConfidence = Math.max(0.62, rescueBest.confidence);
           slateModelUsed = rescueModel;
           slateFallbackAttempted = slateFallbackAttempted || Boolean(fallbackSlateModel);
-        } else if (isTruthyEnv(process.env.AI_UPLOAD_ENABLE_LOCAL_OCR)) {
-          // Final fallback: run local OCR text extraction on top candidate passes.
-          const localOcrPriority = rescuePassPriority.slice(0, 3);
-          for (const pass of localOcrPriority) {
-            const imageDataUrl = passInputMap.get(pass);
-            if (!imageDataUrl) continue;
-            const localRescue = await runLocalBoardOcrNameRescue(imageDataUrl);
-            slatePasses.push({
-              pass,
-              model: "local-ocr (tesseract)",
-              detected: Boolean(localRescue.candidateName),
-              candidateName: localRescue.candidateName || localRescue.rawText || "",
-              confidence: localRescue.confidence || 0,
-            });
-            if (!localRescue.candidateName) continue;
-            slateDetectionPass = pass;
-            slateDetected = true;
-            slateCandidateName = localRescue.candidateName;
-            slateConfidence = Math.max(0.62, localRescue.confidence);
-            slateModelUsed = "local-ocr (tesseract)";
-            break;
-          }
         }
+        // Local Tesseract OCR removed: it crashes on Railway (MODULE_NOT_FOUND).
+        // Use GOOGLE_CLOUD_VISION_API_KEY for slate OCR instead.
       }
 
       if (bestCardResult.subjectName) {
