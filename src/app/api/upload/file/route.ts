@@ -6,10 +6,8 @@ import { parseCatalogFilename } from "@/lib/filename-parser";
 import { validateMediaFilename } from "@/lib/media-filename";
 import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
 import { getKnownSubjectsForEvent, upsertKnownSubjectForEvent } from "@/lib/subject-memory";
-import {
-  isGoogleVisionConfigured,
-  runOcrOnImageBuffer,
-} from "@/lib/slate-ocr";
+import { isGoogleVisionConfigured } from "@/lib/google-vision-ocr";
+import { runOcrOnImageBuffer } from "@/lib/slate-ocr";
 import {
   detectSubjectNameFromCard,
   extractTitleFromVoiceTranscript,
