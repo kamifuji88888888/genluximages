@@ -9,6 +9,7 @@ import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
 import { getKnownSubjectsForEvent, upsertKnownSubjectForEvent } from "@/lib/subject-memory";
 import { isGoogleVisionConfigured } from "@/lib/google-vision-ocr";
 import { chooseBestGoogleSlateOcrEntry, runOcrOnImageBuffer } from "@/lib/slate-ocr";
+import { sanitizeDiagnosticCandidateName } from "@/lib/slate-ocr-text";
 import { scheduleRetryNeedsManualSubjectNaming } from "@/lib/subject-retry";
 import { SUBJECT_SLATE_APPLY_MIN_CONFIDENCE } from "@/lib/subject-naming-constants";
 import {
@@ -831,7 +832,8 @@ export async function POST(request: NextRequest) {
           slateMessage = `No readable slate in this image; matched "${matchResult.subjectName}" from people you already tagged for this event (visual match).`;
         }
       }
-    } catch {
+    } catch (err) {
+      console.error("Slate/card pipeline error:", err);
       subjectName = "";
       subjectSource = "none";
       subjectConfidence = 0;
@@ -843,6 +845,36 @@ export async function POST(request: NextRequest) {
       slateModelUsed = "";
       slateFallbackAttempted = false;
       slateMessage = "Slate/card OCR step failed.";
+    }
+
+    if (!subjectName && slatePasses.length > 0) {
+      const ranked = slatePasses
+        .filter((p) => p.detected && p.candidateName.trim())
+        .map((p) => ({
+          p,
+          cleaned: sanitizeDiagnosticCandidateName(p.candidateName),
+        }))
+        .filter((x) => x.cleaned.length >= 3)
+        .sort(
+          (a, b) =>
+            b.p.confidence - a.p.confidence || b.cleaned.length - a.cleaned.length,
+        );
+      const top = ranked[0];
+      if (top) {
+        const normalizedExisting = sanitizeDiagnosticCandidateName(slateCandidateName);
+        const needsSet =
+          !slateCandidateName.trim() ||
+          normalizedExisting !== top.cleaned ||
+          slateCandidateName.trim() !== top.cleaned;
+        if (needsSet) {
+          slateCandidateName = top.cleaned;
+          slateDetected = true;
+          slateConfidence = Math.max(slateConfidence, top.p.confidence);
+          slateDetectionPass = top.p.pass as SlatePassName;
+          slateModelUsed = top.p.model;
+          slateMessage = `${ranked.length} OCR pass(es) found a name. Top: "${top.cleaned}". Click a pass in the UI or Apply to form.`;
+        }
+      }
     }
   } else if (!autoApplySubjectMatches) {
     slateMessage = "Slate/card detection is disabled (auto-apply subject matches is off).";
@@ -875,6 +907,19 @@ export async function POST(request: NextRequest) {
         ? aiSuggestion.captionDraft
         : `${subjectName}. ${aiSuggestion.captionDraft || ""}`.trim(),
       confidence: Math.max(aiSuggestion.confidence, Math.min(0.95, subjectConfidence)),
+    };
+  } else if (slateCandidateName.trim()) {
+    const sc = sanitizeDiagnosticCandidateName(slateCandidateName).trim() || slateCandidateName.trim();
+    aiSuggestion = {
+      ...aiSuggestion,
+      suggestedTitle: sc,
+      suggestedTags: Array.from(
+        new Set([sc.toLowerCase().replace(/\s+/g, "-"), ...aiSuggestion.suggestedTags]),
+      ).slice(0, 14),
+      captionDraft: aiSuggestion.captionDraft?.toLowerCase().includes(sc.toLowerCase())
+        ? aiSuggestion.captionDraft
+        : `${sc}. ${aiSuggestion.captionDraft || ""}`.trim(),
+      confidence: Math.max(aiSuggestion.confidence, Math.min(0.9, slateConfidence)),
     };
   }
 

@@ -4,6 +4,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { suggestMediaFilename, validateMediaFilename } from "@/lib/media-filename";
+import { sanitizeDiagnosticCandidateName } from "@/lib/slate-ocr-text";
 type UploadResponse = {
   ok: boolean;
   message: string;
@@ -555,6 +556,43 @@ export default function UploadPage() {
       setApplyToFormClicked(false);
       applyToFormCueTimeoutRef.current = null;
     }, 900);
+  };
+
+  const applyOcrPassNameToForm = (rawCandidate: string) => {
+    const cleaned = sanitizeDiagnosticCandidateName(rawCandidate);
+    if (cleaned.length < 3) return;
+    setValues((prev) => ({ ...prev, title: cleaned }));
+    if (activeQueueId) {
+      setQueue((current) =>
+        current.map((item) =>
+          item.id === activeQueueId
+            ? { ...item, draft: { ...item.draft, title: cleaned } }
+            : item,
+        ),
+      );
+    }
+    setLatestAiSuggestion((prev) =>
+      prev
+        ? {
+            ...prev,
+            title: cleaned,
+            slateCandidateName: cleaned,
+            slateDetected: true,
+          }
+        : null,
+    );
+    setStatus({
+      ok: true,
+      message: `Title set to "${cleaned}" from pass diagnostics. Submit catalog when ready.`,
+    });
+    setAiHighlightedFields(["title"]);
+    if (aiHighlightTimeoutRef.current) {
+      window.clearTimeout(aiHighlightTimeoutRef.current);
+    }
+    aiHighlightTimeoutRef.current = window.setTimeout(() => {
+      setAiHighlightedFields([]);
+      aiHighlightTimeoutRef.current = null;
+    }, 1800);
   };
 
   const applyLatestAiToBatchDefaults = () => {
@@ -2089,13 +2127,40 @@ export default function UploadPage() {
                 {latestAiSuggestion.slatePasses.length > 0 ? (
                   <div className="mt-1 rounded border border-fuchsia-100 bg-white/70 p-1.5">
                     <p className="font-semibold">Pass diagnostics</p>
-                    {latestAiSuggestion.slatePasses.map((pass) => (
-                      <p key={`${pass.pass}-${pass.model}`}>
-                        {slateDetectionPassLabel(pass.pass)}: {pass.detected ? "detected" : "none"} ·{" "}
-                        {Math.round((pass.confidence || 0) * 100)}% · {pass.model}
-                        {pass.candidateName ? ` · ${pass.candidateName}` : ""}
-                      </p>
-                    ))}
+                    <p className="mb-1 text-[11px] text-fuchsia-900/80">
+                      Click a detected name below to copy it into the title field.
+                    </p>
+                    {latestAiSuggestion.slatePasses.map((pass, idx) => {
+                      const cleaned = pass.candidateName
+                        ? sanitizeDiagnosticCandidateName(pass.candidateName)
+                        : "";
+                      const canUse = pass.detected && cleaned.length >= 3;
+                      return (
+                        <p key={`${pass.pass}-${pass.model}-${idx}`}>
+                          {slateDetectionPassLabel(pass.pass)}: {pass.detected ? "detected" : "none"} ·{" "}
+                          {Math.round((pass.confidence || 0) * 100)}% · {pass.model}
+                          {pass.candidateName ? (
+                            <>
+                              {" · "}
+                              {canUse ? (
+                                <button
+                                  type="button"
+                                  className="text-left font-semibold text-fuchsia-900 underline decoration-fuchsia-400/80 hover:text-fuchsia-950"
+                                  onClick={() => applyOcrPassNameToForm(pass.candidateName)}
+                                >
+                                  {pass.candidateName}
+                                </button>
+                              ) : (
+                                <span>{pass.candidateName}</span>
+                              )}
+                              {cleaned && cleaned !== pass.candidateName ? (
+                                <span className="text-fuchsia-800/70"> → {cleaned}</span>
+                              ) : null}
+                            </>
+                          ) : null}
+                        </p>
+                      );
+                    })}
                   </div>
                 ) : null}
                 {!latestAiSuggestion.slateDetected && activeQueueItem?.mediaKind === "image" ? (
