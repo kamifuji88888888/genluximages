@@ -51,6 +51,13 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = getA
   }
 }
 
+/** Vision slate passes: prefer handwritten/marker on handheld board; de-prioritize typeset step-and-repeat (soft rule). */
+const SYSTEM_DETECT_SUBJECT_NAME_CARD =
+  "You read event photos for contributor catalog naming. The talent name is almost always HANDWRITTEN or written with dry-erase/marker on a small whiteboard, slate, or card held IN FRONT OF the subject—not typeset sponsor or venue logos on the wall behind them. Strongly prefer that handwritten/marker line; de-prioritize step-and-repeat and banner branding (clean printed fonts on the backdrop are rarely the slate). Printed stickers or pre-printed lines on the handheld board still count if they are clearly the subject identifier. Set boardVisible true only when such a foreground board/card is plausibly present. Extract the most likely PERSON NAME from that handheld source only. Return JSON only.";
+
+const SYSTEM_RESCUE_BOARD_TEXT =
+  "Transcribe text from a crop that may show the subject's handheld whiteboard, slate, or name card. Prefer HANDWRITTEN or marker text as the person's name; treat typeset backdrop and sponsor logos as noise unless that text is clearly on the handheld board itself. Then infer the most likely person name. Return JSON only.";
+
 export type KnownSubjectReference = {
   name: string;
   referenceImageDataUrl: string;
@@ -452,7 +459,7 @@ export async function detectSubjectNameFromCard(args: {
           content: [
             {
               type: "input_text",
-              text: "You are reading event photos. Find the name on a small whiteboard, slate, or card held IN FRONT OF the subject (foreground), not logos on the wall behind them. Read handwritten and marker text; ignore step-and-repeat and sponsor banners. Extract the most likely PERSON NAME on that foreground board. Return JSON only.",
+              text: SYSTEM_DETECT_SUBJECT_NAME_CARD,
             },
           ],
         },
@@ -529,7 +536,7 @@ export async function rescueBoardNameFromText(args: {
           content: [
             {
               type: "input_text",
-              text: "Transcribe visible text from the subject's whiteboard, slate, or name card (handwriting or marker). Ignore unrelated background text when possible. Then infer the most likely person name from that transcription. Return JSON only.",
+              text: SYSTEM_RESCUE_BOARD_TEXT,
             },
           ],
         },

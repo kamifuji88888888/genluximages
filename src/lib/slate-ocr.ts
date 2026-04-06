@@ -1,6 +1,8 @@
 /**
  * Shared slate/board OCR helpers: preprocess images, extract a candidate name from raw OCR text,
  * and run OCR on an image buffer (Google Cloud Vision only; no Tesseract on server).
+ * OpenAI slate passes in upload-ai state a handwriting/marker-on-handheld-board preference; Vision
+ * here is raw OCR—ranking and backdrop penalties in this file still apply.
  */
 import sharp from "sharp";
 import {
