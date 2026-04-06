@@ -48,6 +48,13 @@ enum ImageStatus {
   archived
 }
 
+enum SubjectNamingStatus {
+  needs_manual
+  from_slate
+  from_match
+  manual_resolved
+}
+
 enum OrderStatus {
   pending
   paid
@@ -69,6 +76,23 @@ model User {
   presetAudits UploadPresetAudit[] @relation("PresetAuditActor")
   ownedGalleries SavedGallery[] @relation("GalleryOwner")
   galleryMemberships SavedGalleryMember[]
+  eventSubjectReferences EventSubjectReference[]
+}
+
+/// Saved when a subject is identified from a slate/card; used to visually match later photos without a board.
+model EventSubjectReference {
+  id                 String   @id @default(cuid())
+  photographerId     String
+  eventSlug          String
+  subjectKey         String
+  subjectDisplayName String
+  referenceDataUrl   String   @db.Text
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  photographer       User     @relation(fields: [photographerId], references: [id], onDelete: Cascade)
+
+  @@unique([photographerId, eventSlug, subjectKey])
+  @@index([photographerId, eventSlug])
 }
 
 model ImageAsset {
@@ -96,9 +120,15 @@ model ImageAsset {
   updatedAt      DateTime    @updatedAt
   orderItems     OrderItem[]
   savedGalleryItems SavedGalleryItem[]
+  /// Auto: from_slate / from_match; needs_manual = name this in review; manual_resolved = photographer confirmed.
+  subjectNamingStatus    SubjectNamingStatus?
+  subjectNamingConfidence Float?
+  /// How often we re-tried visual match after a new slate reference (cap to avoid unbounded API use).
+  subjectMatchRetryCount  Int @default(0)
 
   @@index([eventSlug])
   @@index([status])
+  @@index([photographerId, subjectNamingStatus])
 }
 
 model EventPolicy {

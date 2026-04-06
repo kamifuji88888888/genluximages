@@ -4,7 +4,6 @@ import Link from "next/link";
 import Image from "next/image";
 import { DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { suggestMediaFilename, validateMediaFilename } from "@/lib/media-filename";
-
 type UploadResponse = {
   ok: boolean;
   message: string;
@@ -61,6 +60,7 @@ type UploadAutomationResponse = {
       subjectName?: string;
       subjectSource?: "none" | "card" | "match";
       subjectConfidence?: number;
+      subjectNamingStatus?: "from_slate" | "from_match" | "needs_manual" | null;
       confidence?: number;
       source?: "fallback" | "openai";
     };
@@ -107,6 +107,7 @@ type LatestAiSuggestion = {
   subjectName: string;
   subjectSource: "none" | "card" | "match";
   subjectConfidence: number;
+  subjectNamingStatus: "from_slate" | "from_match" | "needs_manual" | null;
   confidence: number;
   source: "fallback" | "openai";
 };
@@ -126,6 +127,8 @@ type UploadFormValues = {
   storageKey: string;
   tags: string;
   attendeeKeywords: string;
+  subjectNamingStatus: "" | "needs_manual" | "from_slate" | "from_match" | "manual_resolved";
+  subjectNamingConfidence: string;
 };
 
 type BatchDefaults = {
@@ -174,6 +177,8 @@ type QueueDraft = Partial<
     | "previewUrl"
     | "fullResUrl"
     | "storageKey"
+    | "subjectNamingStatus"
+    | "subjectNamingConfidence"
   >
 >;
 
@@ -239,6 +244,8 @@ export default function UploadPage() {
     storageKey: "",
     tags: "",
     attendeeKeywords: "",
+    subjectNamingStatus: "",
+    subjectNamingConfidence: "",
   });
   const [batchDefaults, setBatchDefaults] = useState<BatchDefaults>({
     eventName: "",
@@ -445,6 +452,24 @@ export default function UploadPage() {
         return "focused tight center";
       case "focused_tight_left":
         return "focused tight left";
+      case "focused_foreground_slate":
+        return "foreground slate (center)";
+      case "focused_foreground_slate_left":
+        return "foreground slate (left-held)";
+      case "whiteboard_enhanced_foreground_slate":
+        return "foreground slate enhanced (center)";
+      case "whiteboard_enhanced_foreground_slate_left":
+        return "foreground slate enhanced (left)";
+      case "whiteboard_enhanced_foreground_slate_threshold":
+        return "foreground slate threshold (center)";
+      case "whiteboard_enhanced_foreground_slate_left_threshold":
+        return "foreground slate threshold (left)";
+      case "focused_board_candidate":
+        return "auto board region";
+      case "whiteboard_enhanced_board_candidate":
+        return "auto board region enhanced";
+      case "whiteboard_enhanced_board_candidate_threshold":
+        return "auto board region threshold";
       case "whiteboard_enhanced_full":
         return "whiteboard enhanced full";
       case "whiteboard_enhanced_center":
@@ -498,6 +523,14 @@ export default function UploadPage() {
       nextValues[key] = candidate;
       changedFields.push(key);
     }
+    const sns = latestAiSuggestion.subjectNamingStatus;
+    if (sns === "from_slate" || sns === "from_match" || sns === "needs_manual") {
+      nextValues.subjectNamingStatus = sns;
+    }
+    nextValues.subjectNamingConfidence =
+      latestAiSuggestion.subjectConfidence != null
+        ? String(latestAiSuggestion.subjectConfidence)
+        : nextValues.subjectNamingConfidence;
     setValues(nextValues);
     setAiHighlightedFields(changedFields);
     if (aiHighlightTimeoutRef.current) {
@@ -1270,6 +1303,15 @@ export default function UploadPage() {
       location: data.data?.suggestions?.suggestedLocation || item.draft.location,
       tags: suggestedTags || item.draft.tags,
       attendeeKeywords: suggestedAttendeeKeywords || item.draft.attendeeKeywords,
+      subjectNamingStatus: (() => {
+        const sns = data.data?.suggestions?.subjectNamingStatus;
+        if (sns === "from_slate" || sns === "from_match" || sns === "needs_manual") return sns;
+        return item.draft.subjectNamingStatus || "";
+      })(),
+      subjectNamingConfidence:
+        data.data?.suggestions?.subjectConfidence != null
+          ? String(data.data.suggestions.subjectConfidence)
+          : item.draft.subjectNamingConfidence || "",
     };
     updateQueueItem(item.id, { draft: nextDraft });
     setValues((current) => ({
@@ -1285,6 +1327,8 @@ export default function UploadPage() {
       location: nextDraft.location || current.location,
       tags: nextDraft.tags || current.tags,
       attendeeKeywords: nextDraft.attendeeKeywords || current.attendeeKeywords,
+      subjectNamingStatus: nextDraft.subjectNamingStatus || current.subjectNamingStatus,
+      subjectNamingConfidence: nextDraft.subjectNamingConfidence || current.subjectNamingConfidence,
     }));
     setBatchDefaults((current) => ({
       ...current,
@@ -1320,6 +1364,7 @@ export default function UploadPage() {
       subjectName: data.data?.suggestions?.subjectName || "",
       subjectSource: data.data?.suggestions?.subjectSource || "none",
       subjectConfidence: data.data?.suggestions?.subjectConfidence ?? 0,
+      subjectNamingStatus: data.data?.suggestions?.subjectNamingStatus ?? null,
       confidence: data.data?.suggestions?.confidence ?? 0,
       source: data.data?.suggestions?.source || "fallback",
     });
@@ -1343,6 +1388,8 @@ export default function UploadPage() {
       storageKey: item.draft.storageKey || "",
       tags: batchDefaults.tags,
       attendeeKeywords: batchDefaults.attendeeKeywords,
+      subjectNamingStatus: item.draft.subjectNamingStatus || "",
+      subjectNamingConfidence: item.draft.subjectNamingConfidence || "",
     };
 
     const missingRequired = !payload.title || !payload.eventName || !payload.eventSlug || !payload.capturedAt;
@@ -1358,10 +1405,19 @@ export default function UploadPage() {
     }
 
     updateQueueItem(item.id, { submitStatus: "submitting" });
+    const { subjectNamingStatus: sns, subjectNamingConfidence: snc, ...catalogFields } = payload;
     const response = await fetch("/api/upload", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...catalogFields,
+        ...(sns === "needs_manual" || sns === "from_slate" || sns === "from_match" || sns === "manual_resolved"
+          ? { subjectNamingStatus: sns }
+          : {}),
+        ...(snc !== "" && Number.isFinite(Number.parseFloat(snc))
+          ? { subjectNamingConfidence: Number.parseFloat(snc) }
+          : {}),
+      }),
     });
     const data = (await response.json()) as UploadResponse;
     if (!data.ok) {
@@ -1420,10 +1476,23 @@ export default function UploadPage() {
       setValues((current) => ({ ...current, filename: normalizedFilename }));
     }
 
+    const { subjectNamingStatus: snsSingle, subjectNamingConfidence: sncSingle, ...catalogSingle } =
+      payload;
     const response = await fetch("/api/upload", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...catalogSingle,
+        ...(snsSingle === "needs_manual" ||
+        snsSingle === "from_slate" ||
+        snsSingle === "from_match" ||
+        snsSingle === "manual_resolved"
+          ? { subjectNamingStatus: snsSingle }
+          : {}),
+        ...(sncSingle !== "" && Number.isFinite(Number.parseFloat(sncSingle))
+          ? { subjectNamingConfidence: Number.parseFloat(sncSingle) }
+          : {}),
+      }),
     });
 
     const data = (await response.json()) as UploadResponse;
@@ -1446,6 +1515,8 @@ export default function UploadPage() {
         storageKey: "",
         tags: "",
         attendeeKeywords: "",
+        subjectNamingStatus: "",
+        subjectNamingConfidence: "",
       }));
     }
   };
@@ -1458,6 +1529,19 @@ export default function UploadPage() {
         <p className="mt-2 text-sm text-slate-600">
           Upload metadata for event/editorial images using naming conventions so content is
           searchable for agencies, publications, and event attendees.
+        </p>
+        <p className="mt-2 text-sm">
+          <Link
+            href="/upload/needs-names"
+            className="font-semibold text-amber-800 underline decoration-amber-600/60 underline-offset-2 hover:text-amber-900"
+          >
+            Name queue
+          </Link>
+          <span className="text-slate-600">
+            {" "}
+            — images we could not auto-name (no slate / no match). After you get a slate shot, we
+            re-try matches in the background.
+          </span>
         </p>
       </header>
 
@@ -1830,7 +1914,8 @@ export default function UploadPage() {
                   checked={batchAutoApplySubjectMatches}
                   onChange={(event) => setBatchAutoApplySubjectMatches(event.target.checked)}
                 />
-                Auto-apply subject matches (name slates/boards/cards + same-subject recognition)
+                Auto-apply subject matches (slates/cards + match later photos without a board using people
+                you already named for this event)
               </label>
               <button
                 type="button"
@@ -1986,6 +2071,19 @@ export default function UploadPage() {
                   <span className="font-semibold">
                     {latestAiSuggestion.slateApplied ? "yes" : "no"}
                   </span>
+                </p>
+                <p>
+                  Catalog lane:{" "}
+                  <span className="font-semibold">
+                    {latestAiSuggestion.subjectNamingStatus === "needs_manual"
+                      ? "needs manual name (Name queue)"
+                      : latestAiSuggestion.subjectNamingStatus === "from_slate"
+                        ? "auto from slate/card"
+                        : latestAiSuggestion.subjectNamingStatus === "from_match"
+                          ? "auto from prior subject photo"
+                          : "not classified"}
+                  </span>
+                  . Earlier no-slate frames may auto-rename when a later slate identifies that person.
                 </p>
                 <p>{latestAiSuggestion.slateMessage || "Slate/card OCR status unavailable."}</p>
                 {latestAiSuggestion.slatePasses.length > 0 ? (

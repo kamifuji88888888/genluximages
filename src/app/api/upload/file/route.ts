@@ -3,14 +3,18 @@ import path from "node:path";
 import sharp from "sharp";
 import { NextRequest, NextResponse } from "next/server";
 import { parseCatalogFilename } from "@/lib/filename-parser";
+import { db } from "@/lib/db";
 import { validateMediaFilename } from "@/lib/media-filename";
 import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
 import { getKnownSubjectsForEvent, upsertKnownSubjectForEvent } from "@/lib/subject-memory";
 import { isGoogleVisionConfigured } from "@/lib/google-vision-ocr";
-import { runOcrOnImageBuffer } from "@/lib/slate-ocr";
+import { chooseBestGoogleSlateOcrEntry, runOcrOnImageBuffer } from "@/lib/slate-ocr";
+import { scheduleRetryNeedsManualSubjectNaming } from "@/lib/subject-retry";
+import { SUBJECT_SLATE_APPLY_MIN_CONFIDENCE } from "@/lib/subject-naming-constants";
 import {
   detectSubjectNameFromCard,
   extractTitleFromVoiceTranscript,
+  getSubjectMatchMinConfidence,
   matchSubjectAgainstKnown,
   rescueBoardNameFromText,
   suggestUploadMetadata,
@@ -43,34 +47,6 @@ function dataUrlToBuffer(dataUrl: string) {
   const payload = dataUrl.slice(markerIndex + base64Marker.length);
   if (!payload) return null;
   return Buffer.from(payload, "base64");
-}
-
-function pickNameFromOcrText(raw: string) {
-  const cleaned = raw
-    .replace(/[|\\/_~`]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned) return "";
-
-  const lines = raw
-    .split("\n")
-    .map((line) => line.replace(/[^a-zA-Z\s'-]/g, " ").replace(/\s+/g, " ").trim())
-    .filter(Boolean);
-  const candidates = [...lines, cleaned];
-  const stop = new Set(["name", "subject", "guest", "talent", "board", "slate"]);
-  for (const candidate of candidates) {
-    const parts = candidate
-      .split(" ")
-      .map((part) => part.trim())
-      .filter((part) => /^[a-zA-Z][a-zA-Z'-]{1,}$/.test(part))
-      .filter((part) => !stop.has(part.toLowerCase()))
-      .slice(0, 3);
-    if (parts.length < 2) continue;
-    return parts
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-      .join(" ");
-  }
-  return "";
 }
 
 function detectWhiteboardCandidateRegion(args: {
@@ -155,6 +131,12 @@ export async function POST(request: NextRequest) {
       { status: 403 },
     );
   }
+
+  const photographerRecord = await db.user.findFirst({
+    where: { email: { equals: session.email.trim(), mode: "insensitive" } },
+    select: { id: true },
+  });
+  const photographerId = photographerRecord?.id ?? null;
 
   const formData = await request.formData();
   const file = formData.get("file");
@@ -384,8 +366,16 @@ export async function POST(request: NextRequest) {
       imageDataUrl: `data:image/png;base64,${enhancedFullBuffer.toString("base64")}`,
     });
 
-    const originalWidth = metadata.width ?? 0;
-    const originalHeight = metadata.height ?? 0;
+    let originalWidth = metadata.width ?? 0;
+    let originalHeight = metadata.height ?? 0;
+    if (originalWidth < 1 || originalHeight < 1) {
+      const fallbackMeta = await sharp(inputBytes)
+        .rotate()
+        .resize({ width: 4000, height: 4000, fit: "inside", withoutEnlargement: false })
+        .metadata();
+      originalWidth = fallbackMeta.width ?? 0;
+      originalHeight = fallbackMeta.height ?? 0;
+    }
     if (originalWidth > 0 && originalHeight > 0) {
       const scanMeta = await sharp(inputBytes)
         .resize({
@@ -405,6 +395,7 @@ export async function POST(request: NextRequest) {
         sourceHeight: originalHeight,
       });
 
+      /** Handheld slates: lower-mid frame (torso/hands), not upper step-and-repeat. */
       const cropPlans: Array<{
         pass: string;
         enhancedPass: string;
@@ -413,6 +404,22 @@ export async function POST(request: NextRequest) {
         widthRatio: number;
         heightRatio: number;
       }> = [
+        {
+          pass: "focused_foreground_slate",
+          enhancedPass: "whiteboard_enhanced_foreground_slate",
+          leftRatio: 0.18,
+          topRatio: 0.33,
+          widthRatio: 0.64,
+          heightRatio: 0.52,
+        },
+        {
+          pass: "focused_foreground_slate_left",
+          enhancedPass: "whiteboard_enhanced_foreground_slate_left",
+          leftRatio: 0.04,
+          topRatio: 0.3,
+          widthRatio: 0.58,
+          heightRatio: 0.55,
+        },
         {
           pass: "focused_tight_center",
           enhancedPass: "whiteboard_enhanced_tight_center",
@@ -439,7 +446,7 @@ export async function POST(request: NextRequest) {
         },
       ];
       if (scanRegion) {
-        cropPlans.unshift({
+        cropPlans.splice(2, 0, {
           pass: "focused_board_candidate",
           enhancedPass: "whiteboard_enhanced_board_candidate",
           leftRatio: scanRegion.left / originalWidth,
@@ -551,30 +558,70 @@ export async function POST(request: NextRequest) {
   const fallbackSlateModel = (process.env.AI_UPLOAD_SLATE_FALLBACK_MODEL || "").trim();
   if (autoApplySubjectMatches && slatePassInputs.length > 0 && subjectDetectionImageDataUrl) {
     try {
-      let googleSlateResult: { name: string } | null = null;
+      let googleSlateResult: { name: string; pass: SlatePassName } | null = null;
       if (isGoogleVisionConfigured()) {
-        const fullImageBuffer = dataUrlToBuffer(subjectDetectionImageDataUrl);
-        if (fullImageBuffer) {
+        const passMap = new Map(slatePassInputs.map((e) => [e.pass, e.imageDataUrl]));
+        const googleSlatePassOrder: SlatePassName[] = [
+          "whiteboard_enhanced_foreground_slate",
+          "whiteboard_enhanced_foreground_slate_threshold",
+          "focused_foreground_slate",
+          "whiteboard_enhanced_foreground_slate_left",
+          "whiteboard_enhanced_foreground_slate_left_threshold",
+          "focused_foreground_slate_left",
+          "whiteboard_enhanced_board_candidate",
+          "whiteboard_enhanced_board_candidate_threshold",
+          "focused_board_candidate",
+          "whiteboard_enhanced_tight_center",
+          "whiteboard_enhanced_tight_center_threshold",
+          "focused_tight_center",
+          "whiteboard_enhanced_tight_left",
+          "whiteboard_enhanced_tight_left_threshold",
+          "focused_tight_left",
+          "whiteboard_enhanced_center",
+          "whiteboard_enhanced_center_threshold",
+          "focused_center",
+          "whiteboard_enhanced_full",
+          "full_frame",
+        ];
+        const maxGooglePassesRaw = Number.parseInt(process.env.GOOGLE_SLATE_OCR_MAX_PASSES || "", 10);
+        const maxGooglePasses = Number.isFinite(maxGooglePassesRaw)
+          ? Math.min(12, Math.max(1, maxGooglePassesRaw))
+          : 8;
+        const googleTasks: Array<{ pass: SlatePassName; buffer: Buffer }> = [];
+        for (const pass of googleSlatePassOrder) {
+          const dataUrl = passMap.get(pass);
+          const buf = dataUrl ? dataUrlToBuffer(dataUrl) : null;
+          if (buf) googleTasks.push({ pass, buffer: buf });
+          if (googleTasks.length >= maxGooglePasses) break;
+        }
+        if (googleTasks.length > 0) {
           try {
-            const { candidateName, provider } = await runOcrOnImageBuffer(fullImageBuffer);
-            if (candidateName && provider === "google") {
-              googleSlateResult = { name: candidateName };
+            const googleOcrRuns = await Promise.all(
+              googleTasks.map(async ({ pass, buffer }) => {
+                const { candidateName, rawText, provider } = await runOcrOnImageBuffer(buffer);
+                slatePasses.push({
+                  pass,
+                  model: "google-vision",
+                  detected: Boolean(candidateName?.trim()),
+                  candidateName: candidateName || "",
+                  confidence: candidateName ? 0.88 : 0,
+                });
+                return { pass, candidateName: candidateName || "", rawText, provider };
+              })
+            );
+            const visionEntries = googleOcrRuns.filter((r) => r.provider === "google");
+            const bestGoogle = chooseBestGoogleSlateOcrEntry(visionEntries, googleSlatePassOrder);
+            if (bestGoogle?.candidateName) {
+              googleSlateResult = { name: bestGoogle.candidateName, pass: bestGoogle.pass };
               slateDetected = true;
-              slateCandidateName = candidateName;
+              slateCandidateName = bestGoogle.candidateName;
               slateConfidence = 0.9;
-              slateModelUsed = "google-vision (full image)";
-              slateDetectionPass = "full_frame";
-              slateMessage = "Slate name detected from full image (Google Vision).";
-              slatePasses.push({
-                pass: "full_frame",
-                model: "google-vision (full image)",
-                detected: true,
-                candidateName,
-                confidence: 0.9,
-              });
+              slateModelUsed = `google-vision (${bestGoogle.pass})`;
+              slateDetectionPass = bestGoogle.pass;
+              slateMessage = `Slate/whiteboard text read via Google Vision (${bestGoogle.pass.replace(/_/g, " ")}).`;
             }
           } catch (e) {
-            console.warn("Full-image Google Vision OCR failed, falling back to OpenAI passes:", e);
+            console.warn("Google Vision slate OCR (multi-pass) failed, falling back to OpenAI passes:", e);
           }
         }
       }
@@ -588,8 +635,12 @@ export async function POST(request: NextRequest) {
         const passResults: SlatePassResult[] = [];
 
         const modelPassPriority: SlatePassName[] = [
-          "full_frame",
-          "whiteboard_enhanced_full",
+          "whiteboard_enhanced_foreground_slate",
+          "whiteboard_enhanced_foreground_slate_threshold",
+          "focused_foreground_slate",
+          "whiteboard_enhanced_foreground_slate_left",
+          "whiteboard_enhanced_foreground_slate_left_threshold",
+          "focused_foreground_slate_left",
           "focused_board_candidate",
           "whiteboard_enhanced_board_candidate",
           "whiteboard_enhanced_board_candidate_threshold",
@@ -602,6 +653,8 @@ export async function POST(request: NextRequest) {
           "focused_center",
           "whiteboard_enhanced_center",
           "whiteboard_enhanced_center_threshold",
+          "whiteboard_enhanced_full",
+          "full_frame",
         ];
         const passMap = new Map(slatePassInputs.map((entry) => [entry.pass, entry]));
         const orderedPasses = modelPassPriority
@@ -643,7 +696,7 @@ export async function POST(request: NextRequest) {
             confidence: 0.9,
             source: "card",
           },
-          bestCardPass: "full_frame",
+          bestCardPass: googleSlateResult.pass,
           passResults: [],
         };
       } else {
@@ -672,6 +725,12 @@ export async function POST(request: NextRequest) {
 
       if (!bestCardResult.subjectName) {
         const rescuePassPriority: SlatePassName[] = [
+          "whiteboard_enhanced_foreground_slate_threshold",
+          "whiteboard_enhanced_foreground_slate",
+          "focused_foreground_slate",
+          "whiteboard_enhanced_foreground_slate_left_threshold",
+          "whiteboard_enhanced_foreground_slate_left",
+          "focused_foreground_slate_left",
           "whiteboard_enhanced_board_candidate_threshold",
           "whiteboard_enhanced_board_candidate",
           "focused_board_candidate",
@@ -714,7 +773,7 @@ export async function POST(request: NextRequest) {
           slateDetectionPass = rescueBest.pass;
           slateDetected = true;
           slateCandidateName = rescueBest.name;
-          slateConfidence = Math.max(0.62, rescueBest.confidence);
+          slateConfidence = Math.max(SUBJECT_SLATE_APPLY_MIN_CONFIDENCE, rescueBest.confidence);
           slateModelUsed = rescueModel;
           slateFallbackAttempted = slateFallbackAttempted || Boolean(fallbackSlateModel);
         }
@@ -727,7 +786,7 @@ export async function POST(request: NextRequest) {
         slateCandidateName = bestCardResult.subjectName;
         slateConfidence = bestCardResult.confidence;
         slateMessage =
-          bestCardResult.confidence >= 0.62
+          bestCardResult.confidence >= SUBJECT_SLATE_APPLY_MIN_CONFIDENCE
             ? `Slate/card name detected with high confidence (${slateModelUsed || primarySlateModel}).`
             : "Slate/card text found but confidence is below auto-apply threshold.";
       } else if (slateDetected) {
@@ -738,30 +797,38 @@ export async function POST(request: NextRequest) {
 
       const finalCardName = slateCandidateName || bestCardResult.subjectName || "";
       const finalCardConfidence = Math.max(slateConfidence, bestCardResult.confidence || 0);
-      if (finalCardName && finalCardConfidence >= 0.62) {
+      if (finalCardName && finalCardConfidence >= SUBJECT_SLATE_APPLY_MIN_CONFIDENCE) {
         subjectName = finalCardName;
         subjectSource = "card";
         subjectConfidence = finalCardConfidence;
         slateApplied = true;
-        upsertKnownSubjectForEvent({
-          uploaderEmail: session.email,
+        if (photographerId && subjectDetectionImageDataUrl) {
+          await upsertKnownSubjectForEvent({
+            photographerId,
+            eventSlug: eventSlugForSubjects,
+            name: subjectName,
+            referenceImageDataUrl: subjectDetectionImageDataUrl,
+          });
+          scheduleRetryNeedsManualSubjectNaming({
+            photographerId,
+            eventSlug: eventSlugForSubjects,
+          });
+        }
+      } else if (photographerId && subjectDetectionImageDataUrl) {
+        const knownSubjects = await getKnownSubjectsForEvent({
+          photographerId,
           eventSlug: eventSlugForSubjects,
-          name: subjectName,
-          referenceImageDataUrl: subjectDetectionImageDataUrl,
         });
-      } else {
-        const knownSubjects = getKnownSubjectsForEvent({
-          uploaderEmail: session.email,
-          eventSlug: eventSlugForSubjects,
-        });
+        const matchMin = getSubjectMatchMinConfidence();
         const matchResult = await matchSubjectAgainstKnown({
           imageDataUrl: subjectDetectionImageDataUrl,
           knownSubjects,
         });
-        if (matchResult.subjectName && matchResult.confidence >= 0.8) {
+        if (matchResult.subjectName && matchResult.confidence >= matchMin) {
           subjectName = matchResult.subjectName;
           subjectSource = "match";
           subjectConfidence = matchResult.confidence;
+          slateMessage = `No readable slate in this image; matched "${matchResult.subjectName}" from people you already tagged for this event (visual match).`;
         }
       }
     } catch {
@@ -782,6 +849,18 @@ export async function POST(request: NextRequest) {
   } else {
     slateMessage = "Slate/card OCR inputs were not generated from this image.";
   }
+  let subjectNamingStatusResponse: "from_slate" | "from_match" | "needs_manual" | null = null;
+  if (subjectName) {
+    if (subjectSource === "card") subjectNamingStatusResponse = "from_slate";
+    else if (subjectSource === "match") subjectNamingStatusResponse = "from_match";
+  } else if (
+    autoApplySubjectMatches &&
+    slatePassInputs.length > 0 &&
+    subjectDetectionImageDataUrl
+  ) {
+    subjectNamingStatusResponse = "needs_manual";
+  }
+
   if (subjectName) {
     aiSuggestion = {
       ...aiSuggestion,
@@ -838,6 +917,7 @@ export async function POST(request: NextRequest) {
         subjectName: subjectName || "",
         subjectSource,
         subjectConfidence,
+        subjectNamingStatus: subjectNamingStatusResponse,
         confidence: aiSuggestion.confidence,
         source: aiSuggestion.source,
       },

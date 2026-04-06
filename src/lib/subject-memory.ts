@@ -1,18 +1,8 @@
-type KnownSubject = {
-  name: string;
-  referenceImageDataUrl: string;
-  updatedAt: number;
-};
+import { db } from "@/lib/db";
 
-type SubjectStore = Map<string, KnownSubject[]>;
-
-const SUBJECT_TTL_MS = 4 * 60 * 60 * 1000;
-const MAX_SUBJECTS_PER_EVENT = 6;
-const store: SubjectStore = new Map();
-
-function keyFor(uploaderEmail: string, eventSlug: string) {
-  return `${uploaderEmail.toLowerCase()}::${eventSlug.toLowerCase()}`;
-}
+const MAX_SUBJECTS_PER_EVENT = 12;
+/** Keep under typical API / DB limits; reference is already a downscaled preview. */
+const MAX_REFERENCE_DATA_URL_LENGTH = 1_800_000;
 
 function normalizeName(name: string) {
   return name
@@ -21,36 +11,77 @@ function normalizeName(name: string) {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function purgeExpired(list: KnownSubject[]) {
-  const now = Date.now();
-  return list.filter((entry) => now - entry.updatedAt <= SUBJECT_TTL_MS);
+function normalizeEventSlug(eventSlug: string) {
+  return eventSlug.trim().toLowerCase() || "general";
 }
 
-export function getKnownSubjectsForEvent(args: { uploaderEmail: string; eventSlug: string }) {
-  const key = keyFor(args.uploaderEmail, args.eventSlug);
-  const current = store.get(key) || [];
-  const active = purgeExpired(current);
-  if (active.length !== current.length) store.set(key, active);
-  return active.map((entry) => ({
-    name: entry.name,
-    referenceImageDataUrl: entry.referenceImageDataUrl,
+function subjectKey(name: string) {
+  return normalizeName(name).toLowerCase();
+}
+
+export type KnownSubjectForMatch = {
+  name: string;
+  referenceImageDataUrl: string;
+};
+
+export async function getKnownSubjectsForEvent(args: {
+  photographerId: string;
+  eventSlug: string;
+}): Promise<KnownSubjectForMatch[]> {
+  const slug = normalizeEventSlug(args.eventSlug);
+  const rows = await db.eventSubjectReference.findMany({
+    where: { photographerId: args.photographerId, eventSlug: slug },
+    orderBy: { updatedAt: "desc" },
+    take: MAX_SUBJECTS_PER_EVENT,
+  });
+  return rows.map((r) => ({
+    name: r.subjectDisplayName,
+    referenceImageDataUrl: r.referenceDataUrl,
   }));
 }
 
-export function upsertKnownSubjectForEvent(args: {
-  uploaderEmail: string;
+export async function upsertKnownSubjectForEvent(args: {
+  photographerId: string;
   eventSlug: string;
   name: string;
   referenceImageDataUrl: string;
 }) {
-  const key = keyFor(args.uploaderEmail, args.eventSlug);
-  const normalized = normalizeName(args.name);
-  const now = Date.now();
-  const current = purgeExpired(store.get(key) || []);
-  const withoutSame = current.filter((entry) => entry.name.toLowerCase() !== normalized.toLowerCase());
-  const next: KnownSubject[] = [
-    { name: normalized, referenceImageDataUrl: args.referenceImageDataUrl, updatedAt: now },
-    ...withoutSame,
-  ].slice(0, MAX_SUBJECTS_PER_EVENT);
-  store.set(key, next);
+  const slug = normalizeEventSlug(args.eventSlug);
+  const display = normalizeName(args.name);
+  const key = subjectKey(args.name);
+  let dataUrl = args.referenceImageDataUrl;
+  if (dataUrl.length > MAX_REFERENCE_DATA_URL_LENGTH) {
+    dataUrl = dataUrl.slice(0, MAX_REFERENCE_DATA_URL_LENGTH);
+  }
+
+  await db.eventSubjectReference.upsert({
+    where: {
+      photographerId_eventSlug_subjectKey: {
+        photographerId: args.photographerId,
+        eventSlug: slug,
+        subjectKey: key,
+      },
+    },
+    create: {
+      photographerId: args.photographerId,
+      eventSlug: slug,
+      subjectKey: key,
+      subjectDisplayName: display,
+      referenceDataUrl: dataUrl,
+    },
+    update: {
+      subjectDisplayName: display,
+      referenceDataUrl: dataUrl,
+    },
+  });
+
+  const ordered = await db.eventSubjectReference.findMany({
+    where: { photographerId: args.photographerId, eventSlug: slug },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+  const staleIds = ordered.slice(MAX_SUBJECTS_PER_EVENT).map((r) => r.id);
+  if (staleIds.length > 0) {
+    await db.eventSubjectReference.deleteMany({ where: { id: { in: staleIds } } });
+  }
 }

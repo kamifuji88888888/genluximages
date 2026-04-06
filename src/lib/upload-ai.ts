@@ -1,4 +1,5 @@
 import { ParsedFilename } from "@/lib/filename-parser";
+import { SUBJECT_MATCH_MIN_CONFIDENCE_DEFAULT } from "@/lib/subject-naming-constants";
 
 type CloudSuggestionShape = {
   suggestedTitle?: string;
@@ -54,6 +55,14 @@ export type KnownSubjectReference = {
   name: string;
   referenceImageDataUrl: string;
 };
+
+/** Min model confidence to auto-apply a visual match when no slate name (default 0.8). */
+export function getSubjectMatchMinConfidence(): number {
+  const raw = process.env.AI_UPLOAD_SUBJECT_MATCH_MIN_CONFIDENCE?.trim() ?? "";
+  const n = Number.parseFloat(raw);
+  if (Number.isFinite(n) && n >= 0.5 && n <= 1) return n;
+  return SUBJECT_MATCH_MIN_CONFIDENCE_DEFAULT;
+}
 
 export type SubjectDetectionResult = {
   subjectName?: string;
@@ -443,7 +452,7 @@ export async function detectSubjectNameFromCard(args: {
           content: [
             {
               type: "input_text",
-              text: "You are reading event photos. Detect small whiteboards/name slates/name boards/dry erase boards/paper cards held near the subject. Extract the most likely PERSON NAME written on the slate, even when handwriting is imperfect. Return JSON only.",
+              text: "You are reading event photos. Find the name on a small whiteboard, slate, or card held IN FRONT OF the subject (foreground), not logos on the wall behind them. Read handwritten and marker text; ignore step-and-repeat and sponsor banners. Extract the most likely PERSON NAME on that foreground board. Return JSON only.",
             },
           ],
         },
@@ -520,7 +529,7 @@ export async function rescueBoardNameFromText(args: {
           content: [
             {
               type: "input_text",
-              text: "Transcribe any visible text from a small whiteboard/name slate/card in this photo. Then infer a likely person name from the transcribed text when possible. Return JSON only.",
+              text: "Transcribe visible text from the subject's whiteboard, slate, or name card (handwriting or marker). Ignore unrelated background text when possible. Then infer the most likely person name from that transcription. Return JSON only.",
             },
           ],
         },
@@ -580,18 +589,18 @@ export async function matchSubjectAgainstKnown(args: {
   const apiKey = process.env.OPENAI_API_KEY || "";
   if (!apiKey) return { confidence: 0, source: "none" };
   const model = process.env.AI_UPLOAD_MODEL || "gpt-4.1-mini";
-  const candidates = args.knownSubjects.slice(0, 5);
+  const candidates = args.knownSubjects.slice(0, 8);
 
   const content: Array<{ type: "input_text" | "input_image"; text?: string; image_url?: string }> = [
     {
       type: "input_text",
-      text: "Given a candidate event photo and reference subjects, choose the best subject match or none.",
+      text: "The first image is a new event photo. It may NOT show a name board. The following pairs are (name, reference photo) for people already identified from earlier images (usually from a slate). Decide if the new photo shows the same person as exactly one reference, by face, hair, skin tone, build, outfit, and context. If none match clearly, return none.",
     },
-    { type: "input_text", text: "Candidate image:" },
+    { type: "input_text", text: "New photo (candidate):" },
     { type: "input_image", image_url: args.imageDataUrl },
   ];
   for (const subject of candidates) {
-    content.push({ type: "input_text", text: `Reference subject: ${subject.name}` });
+    content.push({ type: "input_text", text: `Reference — ${subject.name}:` });
     content.push({ type: "input_image", image_url: subject.referenceImageDataUrl });
   }
 
@@ -609,7 +618,7 @@ export async function matchSubjectAgainstKnown(args: {
           content: [
             {
               type: "input_text",
-              text: "Match subjects conservatively. If uncertain, return no match. Return JSON only.",
+              text: "You re-identify event attendees across photos. Reference images were labeled with a name (often from a slate in that shot). The candidate image may be a different pose, crop, or angle and may have no slate—match only if it is clearly the same individual. If unsure or it could be a different person, return matchedName \"none\" and confidence 0. Return JSON only.",
             },
           ],
         },
@@ -637,10 +646,18 @@ export async function matchSubjectAgainstKnown(args: {
   const data = (await response.json()) as { output_text?: string };
   if (!data.output_text) return { confidence: 0, source: "none" };
   const parsed = JSON.parse(data.output_text) as { matchedName: string; confidence: number };
-  const matched = parsed.matchedName.trim();
-  if (!matched || matched.toLowerCase() === "none") return { confidence: 0, source: "none" };
+  const matchedRaw = parsed.matchedName.trim();
+  if (!matchedRaw || matchedRaw.toLowerCase() === "none") return { confidence: 0, source: "none" };
+  const matchNorm = matchedRaw.toLowerCase();
+  const exact = candidates.find((c) => c.name.toLowerCase() === matchNorm);
+  const chosen =
+    exact ||
+    candidates.find(
+      (c) => matchNorm.includes(c.name.toLowerCase()) || c.name.toLowerCase().includes(matchNorm),
+    );
+  if (!chosen) return { confidence: 0, source: "none" };
   return {
-    subjectName: matched,
+    subjectName: chosen.name,
     confidence: Math.max(0, Math.min(1, parsed.confidence || 0)),
     source: "match",
   };

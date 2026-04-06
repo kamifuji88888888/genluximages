@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Prisma } from "@prisma/client";
+import { Prisma, SubjectNamingStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { validateMediaFilename } from "@/lib/media-filename";
 import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
@@ -28,6 +28,8 @@ export async function POST(request: NextRequest) {
     storageKey: string;
     tags: string;
     attendeeKeywords: string;
+    subjectNamingStatus: SubjectNamingStatus;
+    subjectNamingConfidence: number;
   }>;
 
   if (
@@ -85,6 +87,21 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const allowedNaming: SubjectNamingStatus[] = [
+    "needs_manual",
+    "from_slate",
+    "from_match",
+    "manual_resolved",
+  ];
+  let subjectNamingStatus: SubjectNamingStatus | undefined;
+  if (body.subjectNamingStatus && allowedNaming.includes(body.subjectNamingStatus)) {
+    subjectNamingStatus = body.subjectNamingStatus;
+  }
+  let subjectNamingConfidence: number | undefined;
+  if (typeof body.subjectNamingConfidence === "number" && Number.isFinite(body.subjectNamingConfidence)) {
+    subjectNamingConfidence = Math.max(0, Math.min(1, body.subjectNamingConfidence));
+  }
+
   try {
     const photographer = await db.user.upsert({
       where: { email: session.email.toLowerCase() },
@@ -115,6 +132,8 @@ export async function POST(request: NextRequest) {
         storageKey: body.storageKey || null,
         status: "pending",
         photographerId: photographer.id,
+        subjectNamingStatus: subjectNamingStatus ?? null,
+        subjectNamingConfidence: subjectNamingConfidence ?? null,
       },
     });
   } catch (error) {
