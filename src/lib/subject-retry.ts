@@ -4,6 +4,7 @@
  */
 import { db } from "@/lib/db";
 import { getKnownSubjectsForEvent } from "@/lib/subject-memory";
+import { makePortraitReidCropDataUrl } from "@/lib/subject-match-crop";
 import {
   getSubjectMatchMinConfidence,
   matchSubjectAgainstKnown,
@@ -22,7 +23,9 @@ function absolutePreviewUrl(previewUrl: string): string {
   return `${base}${path}`;
 }
 
-async function fetchPreviewAsDataUrl(previewUrl: string): Promise<string | null> {
+async function fetchPreviewImage(
+  previewUrl: string,
+): Promise<{ dataUrl: string; buffer: Buffer } | null> {
   try {
     const url = absolutePreviewUrl(previewUrl);
     const controller = new AbortController();
@@ -30,11 +33,12 @@ async function fetchPreviewAsDataUrl(previewUrl: string): Promise<string | null>
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timer);
     if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.byteLength < 32 || buf.byteLength > 12 * 1024 * 1024) return null;
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.byteLength < 32 || buffer.byteLength > 12 * 1024 * 1024) return null;
     const mime = res.headers.get("content-type")?.split(";")[0]?.trim() || "image/jpeg";
     if (!mime.startsWith("image/")) return null;
-    return `data:${mime};base64,${buf.toString("base64")}`;
+    const dataUrl = `data:${mime};base64,${buffer.toString("base64")}`;
+    return { dataUrl, buffer };
   } catch {
     return null;
   }
@@ -76,16 +80,18 @@ export async function retryNeedsManualSubjectNaming(args: {
   let updated = 0;
 
   for (const row of pending) {
-    const dataUrl = await fetchPreviewAsDataUrl(row.previewUrl);
+    const preview = await fetchPreviewImage(row.previewUrl);
     await db.imageAsset.update({
       where: { id: row.id },
       data: { subjectMatchRetryCount: { increment: 1 } },
     });
 
-    if (!dataUrl) continue;
+    if (!preview) continue;
 
+    const portraitCrop = await makePortraitReidCropDataUrl(preview.buffer);
     const match = await matchSubjectAgainstKnown({
-      imageDataUrl: dataUrl,
+      imageDataUrl: preview.dataUrl,
+      portraitCropDataUrl: portraitCrop,
       knownSubjects: known,
     });
 

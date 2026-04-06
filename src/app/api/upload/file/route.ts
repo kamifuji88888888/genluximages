@@ -10,6 +10,7 @@ import { getKnownSubjectsForEvent, upsertKnownSubjectForEvent } from "@/lib/subj
 import { isGoogleVisionConfigured } from "@/lib/google-vision-ocr";
 import { chooseBestGoogleSlateOcrEntry, runOcrOnImageBuffer } from "@/lib/slate-ocr";
 import { sanitizeDiagnosticCandidateName } from "@/lib/slate-ocr-text";
+import { makePortraitReidCropDataUrl } from "@/lib/subject-match-crop";
 import { scheduleRetryNeedsManualSubjectNaming } from "@/lib/subject-retry";
 import { SUBJECT_SLATE_APPLY_MIN_CONFIDENCE } from "@/lib/subject-naming-constants";
 import {
@@ -796,9 +797,69 @@ export async function POST(request: NextRequest) {
         slateMessage = "No slate/card name detected after primary + fallback model passes.";
       }
 
-      const finalCardName = slateCandidateName || bestCardResult.subjectName || "";
+      const finalCardName = (slateCandidateName || bestCardResult.subjectName || "").trim();
       const finalCardConfidence = Math.max(slateConfidence, bestCardResult.confidence || 0);
-      if (finalCardName && finalCardConfidence >= SUBJECT_SLATE_APPLY_MIN_CONFIDENCE) {
+      const cardWouldApply =
+        Boolean(finalCardName) && finalCardConfidence >= SUBJECT_SLATE_APPLY_MIN_CONFIDENCE;
+
+      const matchMin = getSubjectMatchMinConfidence();
+      let knownSubjects: Awaited<ReturnType<typeof getKnownSubjectsForEvent>> = [];
+      let matchResult: Awaited<ReturnType<typeof matchSubjectAgainstKnown>> = {
+        confidence: 0,
+        source: "none",
+      };
+      if (photographerId && subjectDetectionImageDataUrl) {
+        knownSubjects = await getKnownSubjectsForEvent({
+          photographerId,
+          eventSlug: eventSlugForSubjects,
+        });
+        if (knownSubjects.length > 0) {
+          const portraitReidCrop = await makePortraitReidCropDataUrl(inputBytes);
+          matchResult = await matchSubjectAgainstKnown({
+            imageDataUrl: subjectDetectionImageDataUrl,
+            portraitCropDataUrl: portraitReidCrop,
+            knownSubjects,
+          });
+        }
+      }
+
+      const visualStrong = Boolean(
+        matchResult.subjectName && matchResult.confidence >= matchMin,
+      );
+      const cardNorm = finalCardName.toLowerCase();
+      const cardNameIsKnown =
+        cardWouldApply &&
+        knownSubjects.some((k) => k.name.trim().toLowerCase() === cardNorm);
+
+      /** Backdrop OCR often reads logos; if that string is not a known attendee but face-match is, prefer match. */
+      const preferVisualOverBackdropCard =
+        Boolean(photographerId && subjectDetectionImageDataUrl) &&
+        visualStrong &&
+        cardWouldApply &&
+        !cardNameIsKnown;
+
+      if (
+        preferVisualOverBackdropCard &&
+        matchResult.subjectName &&
+        photographerId &&
+        subjectDetectionImageDataUrl
+      ) {
+        subjectName = matchResult.subjectName;
+        subjectSource = "match";
+        subjectConfidence = matchResult.confidence;
+        slateApplied = false;
+        slateMessage = `Matched "${matchResult.subjectName}" from an earlier tagged photo. OCR suggested "${finalCardName}", which is not someone already named for this event, so the face match was used instead.`;
+        await upsertKnownSubjectForEvent({
+          photographerId,
+          eventSlug: eventSlugForSubjects,
+          name: subjectName,
+          referenceImageDataUrl: subjectDetectionImageDataUrl,
+        });
+        scheduleRetryNeedsManualSubjectNaming({
+          photographerId,
+          eventSlug: eventSlugForSubjects,
+        });
+      } else if (cardWouldApply) {
         subjectName = finalCardName;
         subjectSource = "card";
         subjectConfidence = finalCardConfidence;
@@ -815,22 +876,11 @@ export async function POST(request: NextRequest) {
             eventSlug: eventSlugForSubjects,
           });
         }
-      } else if (photographerId && subjectDetectionImageDataUrl) {
-        const knownSubjects = await getKnownSubjectsForEvent({
-          photographerId,
-          eventSlug: eventSlugForSubjects,
-        });
-        const matchMin = getSubjectMatchMinConfidence();
-        const matchResult = await matchSubjectAgainstKnown({
-          imageDataUrl: subjectDetectionImageDataUrl,
-          knownSubjects,
-        });
-        if (matchResult.subjectName && matchResult.confidence >= matchMin) {
-          subjectName = matchResult.subjectName;
-          subjectSource = "match";
-          subjectConfidence = matchResult.confidence;
-          slateMessage = `No readable slate in this image; matched "${matchResult.subjectName}" from people you already tagged for this event (visual match).`;
-        }
+      } else if (photographerId && subjectDetectionImageDataUrl && visualStrong && matchResult.subjectName) {
+        subjectName = matchResult.subjectName;
+        subjectSource = "match";
+        subjectConfidence = matchResult.confidence;
+        slateMessage = `No readable slate in this image; matched "${matchResult.subjectName}" from people you already tagged for this event (visual match).`;
       }
     } catch (err) {
       console.error("Slate/card pipeline error:", err);

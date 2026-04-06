@@ -3,7 +3,11 @@
 import Link from "next/link";
 import Image from "next/image";
 import { DragEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { suggestMediaFilename, validateMediaFilename } from "@/lib/media-filename";
+import {
+  getMediaKindFromExtension,
+  suggestMediaFilename,
+  validateMediaFilename,
+} from "@/lib/media-filename";
 import { sanitizeDiagnosticCandidateName } from "@/lib/slate-ocr-text";
 type UploadResponse = {
   ok: boolean;
@@ -213,6 +217,16 @@ function filenameStem(name: string) {
   return name.replace(/\.[^.]+$/, "").toLowerCase();
 }
 
+/** Preview + labels: invalid catalog names yield mediaKind "unknown" even for .jpg — infer from MIME/extension. */
+function inferQueueItemMediaKind(item: Pick<QueueItem, "mediaKind" | "file">): "image" | "video" | "unknown" {
+  if (item.mediaKind === "image" || item.mediaKind === "video") return item.mediaKind;
+  const mime = item.file.type;
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  const ext = item.file.name.match(/\.([a-z0-9]+)$/i)?.[1] || "";
+  return getMediaKindFromExtension(ext);
+}
+
 export default function UploadPage() {
   const [status, setStatus] = useState<UploadResponse | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -269,8 +283,8 @@ export default function UploadPage() {
   const aiHighlightTimeoutRef = useRef<number | null>(null);
   const [clickedQueueCueId, setClickedQueueCueId] = useState<string | null>(null);
   const queueClickCueTimeoutRef = useRef<number | null>(null);
+  /** True after "Apply to form" until queue/suggestion changes (stays lit so user does not re-click). */
   const [applyToFormClicked, setApplyToFormClicked] = useState(false);
-  const applyToFormCueTimeoutRef = useRef<number | null>(null);
   const [slateSelectMode, setSlateSelectMode] = useState(false);
   const [slateSelectBox, setSlateSelectBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [slateSelectImageSize, setSlateSelectImageSize] = useState<{
@@ -359,9 +373,6 @@ export default function UploadPage() {
       }
       if (queueClickCueTimeoutRef.current) {
         window.clearTimeout(queueClickCueTimeoutRef.current);
-      }
-      if (applyToFormCueTimeoutRef.current) {
-        window.clearTimeout(applyToFormCueTimeoutRef.current);
       }
       for (const item of queueRef.current) URL.revokeObjectURL(item.objectUrl);
     },
@@ -506,6 +517,10 @@ export default function UploadPage() {
     );
   }, [activeQueueFilename]);
 
+  useEffect(() => {
+    setApplyToFormClicked(false);
+  }, [activeQueueId]);
+
   const applyLatestAiToForm = () => {
     if (!latestAiSuggestion) return;
     const nextValues = { ...values };
@@ -549,13 +564,6 @@ export default function UploadPage() {
           : "Applied AI suggestions (no field values changed).",
     });
     setApplyToFormClicked(true);
-    if (applyToFormCueTimeoutRef.current) {
-      window.clearTimeout(applyToFormCueTimeoutRef.current);
-    }
-    applyToFormCueTimeoutRef.current = window.setTimeout(() => {
-      setApplyToFormClicked(false);
-      applyToFormCueTimeoutRef.current = null;
-    }, 900);
   };
 
   const applyOcrPassNameToForm = (rawCandidate: string) => {
@@ -581,6 +589,7 @@ export default function UploadPage() {
           }
         : null,
     );
+    setApplyToFormClicked(false);
     setStatus({
       ok: true,
       message: `Title set to "${cleaned}" from pass diagnostics. Submit catalog when ready.`,
@@ -1224,6 +1233,7 @@ export default function UploadPage() {
               }
             : null
         );
+        setApplyToFormClicked(false);
         setManualSlateOcrMessage(
           result.provider === "google"
             ? `Applied "${candidateName}" to title (Google Vision).`
@@ -1375,6 +1385,7 @@ export default function UploadPage() {
       tags: current.tags || nextDraft.tags || "",
       attendeeKeywords: current.attendeeKeywords || nextDraft.attendeeKeywords || "",
     }));
+    setApplyToFormClicked(false);
     setLatestAiSuggestion({
       title: data.data?.suggestions?.suggestedTitle || "",
       eventName: data.data?.suggestions?.suggestedEventName || "",
@@ -1656,7 +1667,9 @@ export default function UploadPage() {
                 </div>
               )}
               <div className="grid gap-2 md:grid-cols-3">
-                {queue.map((item) => (
+                {queue.map((item) => {
+                  const displayKind = inferQueueItemMediaKind(item);
+                  return (
                   <div
                     key={item.id}
                     className={`relative rounded-xl border p-2 transition ${
@@ -1676,7 +1689,7 @@ export default function UploadPage() {
                       aria-pressed={activeQueueId === item.id}
                       className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
                     >
-                      {item.mediaKind === "image" ? (
+                      {displayKind === "image" ? (
                         <Image
                           src={item.objectUrl}
                           alt={item.file.name}
@@ -1685,13 +1698,22 @@ export default function UploadPage() {
                           unoptimized
                           className="h-24 w-full rounded object-cover"
                         />
-                      ) : (
+                      ) : displayKind === "video" ? (
                         <div className="flex h-24 w-full items-center justify-center rounded bg-slate-100 text-xs text-slate-600">
                           Video file
                         </div>
+                      ) : (
+                        <div className="flex h-24 w-full items-center justify-center rounded bg-slate-100 text-xs text-slate-600">
+                          File preview
+                        </div>
                       )}
                       <p className="mt-1 truncate text-xs text-slate-700">{item.file.name}</p>
-                      <p className="text-[10px] text-slate-500">Type: {item.mediaKind}</p>
+                      <p className="text-[10px] text-slate-500">
+                        Type: {displayKind}
+                        {!item.filenameValid && displayKind !== "unknown"
+                          ? " · rename for catalog"
+                          : null}
+                      </p>
                       {item.voiceNote ? (
                         <p className="text-[10px] text-emerald-700">Voice note: {item.voiceNote.name}</p>
                       ) : null}
@@ -1722,7 +1744,8 @@ export default function UploadPage() {
                       remove
                     </button>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ) : null}
@@ -2010,13 +2033,19 @@ export default function UploadPage() {
                   <button
                     type="button"
                     onClick={applyLatestAiToForm}
-                    className={`rounded-lg px-2.5 py-1 text-xs font-semibold text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
+                    disabled={applyToFormClicked}
+                    aria-label={
+                      applyToFormClicked
+                        ? "AI suggestions already applied to the form"
+                        : "Copy AI draft suggestions into the form fields"
+                    }
+                    className={`rounded-lg px-2.5 py-1 text-xs font-semibold text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-default disabled:opacity-100 ${
                       applyToFormClicked
                         ? "bg-emerald-600"
                         : "bg-blue-700 hover:bg-blue-800 active:bg-blue-900"
                     }`}
                   >
-                    {applyToFormClicked ? "Applied" : "Apply to form"}
+                    {applyToFormClicked ? "Applied to form" : "Apply to form"}
                   </button>
                   <button
                     type="button"

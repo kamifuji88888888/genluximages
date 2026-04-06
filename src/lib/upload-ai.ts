@@ -580,6 +580,8 @@ export async function rescueBoardNameFromText(args: {
 
 export async function matchSubjectAgainstKnown(args: {
   imageDataUrl?: string;
+  /** Optional tighter upper-body crop of the same frame (reduces step-and-repeat noise). */
+  portraitCropDataUrl?: string;
   knownSubjects: KnownSubjectReference[];
 }): Promise<SubjectDetectionResult> {
   if (!args.imageDataUrl || args.knownSubjects.length === 0) return { confidence: 0, source: "none" };
@@ -591,14 +593,21 @@ export async function matchSubjectAgainstKnown(args: {
   const model = process.env.AI_UPLOAD_MODEL || "gpt-4.1-mini";
   const candidates = args.knownSubjects.slice(0, 8);
 
+  const portraitCropUrl = args.portraitCropDataUrl?.trim() || "";
+  const hasPortraitCrop = portraitCropUrl.length > 0;
+  const intro = hasPortraitCrop
+    ? "The first image is the full new event photo; the second is a tighter crop of the same shot (face and upper body). Both show the same candidate. Ignore step-and-repeat logos and backdrop text—they are not the person's name. The following pairs are (name, reference photo) for people already identified from earlier images (usually from a slate). Decide if the candidate is the same person as exactly one reference, by face, hair, glasses, skin tone, build, outfit, and pose. If none match clearly, return none."
+    : "The first image is a new event photo; the main subject is usually the person in the foreground. Ignore step-and-repeat logos and backdrop text—they are not the person's name. The following pairs are (name, reference photo) for people already identified from earlier images (usually from a slate). Decide if the new photo shows the same person as exactly one reference, by face, hair, glasses, skin tone, build, outfit, and pose. If none match clearly, return none.";
+
   const content: Array<{ type: "input_text" | "input_image"; text?: string; image_url?: string }> = [
-    {
-      type: "input_text",
-      text: "The first image is a new event photo. It may NOT show a name board. The following pairs are (name, reference photo) for people already identified from earlier images (usually from a slate). Decide if the new photo shows the same person as exactly one reference, by face, hair, skin tone, build, outfit, and context. If none match clearly, return none.",
-    },
-    { type: "input_text", text: "New photo (candidate):" },
+    { type: "input_text", text: intro },
+    { type: "input_text", text: "New photo (candidate, full frame):" },
     { type: "input_image", image_url: args.imageDataUrl },
   ];
+  if (hasPortraitCrop) {
+    content.push({ type: "input_text", text: "Same candidate (portrait crop):" });
+    content.push({ type: "input_image", image_url: portraitCropUrl });
+  }
   for (const subject of candidates) {
     content.push({ type: "input_text", text: `Reference — ${subject.name}:` });
     content.push({ type: "input_image", image_url: subject.referenceImageDataUrl });
@@ -618,7 +627,7 @@ export async function matchSubjectAgainstKnown(args: {
           content: [
             {
               type: "input_text",
-              text: "You re-identify event attendees across photos. Reference images were labeled with a name (often from a slate in that shot). The candidate image may be a different pose, crop, or angle and may have no slate—match only if it is clearly the same individual. If unsure or it could be a different person, return matchedName \"none\" and confidence 0. Return JSON only.",
+              text: "You re-identify event attendees across photos. Reference images were labeled with a name (often from a slate in that shot). The candidate may be a different pose, crop, or angle, may include glasses, and may have no slate—compare the foreground person only; ignore backdrop branding. Match only if it is clearly the same individual. If unsure or it could be a different person, return matchedName \"none\" and confidence 0. Return JSON only.",
             },
           ],
         },
