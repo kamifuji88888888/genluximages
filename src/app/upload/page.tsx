@@ -242,7 +242,10 @@ export default function UploadPage() {
   const [activeQueueId, setActiveQueueId] = useState<string | null>(null);
   const queueRef = useRef<QueueItem[]>([]);
   const filePickerRef = useRef<HTMLInputElement | null>(null);
+  const folderPickerRef = useRef<HTMLInputElement | null>(null);
+  const batchDragDepthRef = useRef(0);
   const uploadFileInputId = "upload-file-input";
+  const [batchBucketDragActive, setBatchBucketDragActive] = useState(false);
   const [role, setRole] = useState<string | null>(null);
   const [values, setValues] = useState<UploadFormValues>({
     title: "",
@@ -917,8 +920,31 @@ export default function UploadPage() {
 
   const handleDrop = (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
+    batchDragDepthRef.current = 0;
+    setBatchBucketDragActive(false);
     const dropped = Array.from(event.dataTransfer.files);
     addFilesToQueue(dropped);
+  };
+
+  const handleBatchBucketDragEnter = (event: DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    batchDragDepthRef.current += 1;
+    setBatchBucketDragActive(true);
+  };
+
+  const handleBatchBucketDragLeave = (event: DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    batchDragDepthRef.current = Math.max(0, batchDragDepthRef.current - 1);
+    if (batchDragDepthRef.current === 0) {
+      setBatchBucketDragActive(false);
+    }
+  };
+
+  const handleBatchBucketDragOver = (event: DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
   };
 
   const selectQueueItemWithCue = (id: string) => {
@@ -1576,8 +1602,9 @@ export default function UploadPage() {
         <p className="text-xs uppercase tracking-wide text-slate-500">Contributor Portal</p>
         <h1 className="text-3xl font-semibold text-slate-900">Photographer Upload</h1>
         <p className="mt-2 text-sm text-slate-600">
-          Upload metadata for event/editorial images using naming conventions so content is
-          searchable for agencies, publications, and event attendees.
+          Drop a whole batch of event photos into the bucket below—we read handheld slates and
+          whiteboards (OCR), match people you already named, and suggest catalog-ready filenames and
+          titles.
         </p>
         <p className="mt-2 text-sm">
           <Link
@@ -1595,43 +1622,108 @@ export default function UploadPage() {
       </header>
 
       <section className="rounded-2xl border border-slate-200 bg-white p-5">
-        <div className="mb-4 rounded-xl border border-dashed border-slate-300 p-4">
-          <p className="text-sm font-semibold text-slate-900">Automation: upload image first</p>
-          <p className="mt-1 text-xs text-slate-600">
-            This generates watermarked preview + full-res paths and auto-fills metadata suggestions
-            from your filename.
-          </p>
+        <div
+          role="region"
+          aria-label="Batch upload bucket"
+          onDragEnter={handleBatchBucketDragEnter}
+          onDragLeave={handleBatchBucketDragLeave}
+          onDragOver={handleBatchBucketDragOver}
+          onDrop={handleDrop}
+          className={`mb-4 rounded-2xl border-2 border-dashed p-6 transition-colors md:p-8 ${
+            batchBucketDragActive
+              ? "border-indigo-500 bg-indigo-50/90 shadow-inner"
+              : "border-indigo-200/80 bg-gradient-to-b from-indigo-50/70 to-white"
+          }`}
+        >
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-indigo-700">
+                Batch bucket
+              </p>
+              <h2 className="mt-1 text-lg font-semibold text-slate-900 md:text-xl">
+                Drop your event photos here
+              </h2>
+              <p className="mt-2 max-w-xl text-sm leading-relaxed text-slate-600">
+                Add many images at once (or a whole folder). We use OCR on handheld slates and
+                whiteboards, visual matching for repeat guests, and your filename rules—then fill in
+                titles and metadata automatically.
+              </p>
+              <ol className="mt-3 list-decimal space-y-1 pl-5 text-xs text-slate-600">
+                <li>Add files to the bucket (drag-and-drop or browse).</li>
+                <li>
+                  If filenames need our catalog pattern, use{" "}
+                  <span className="font-semibold text-slate-800">Fix all invalid filenames</span>{" "}
+                  below.
+                </li>
+                <li>
+                  Run <span className="font-semibold text-slate-800">Auto-process</span> on the
+                  queue (or batch autopilot) to OCR slates and apply names.
+                </li>
+              </ol>
+            </div>
+            <div className="flex shrink-0 flex-col gap-2 sm:flex-row md:flex-col">
+              <button
+                type="button"
+                onClick={() => filePickerRef.current?.click()}
+                disabled={isAutoUploading}
+                className="rounded-xl bg-indigo-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-800 disabled:opacity-50"
+              >
+                Choose images
+              </button>
+              <button
+                type="button"
+                onClick={() => folderPickerRef.current?.click()}
+                disabled={isAutoUploading}
+                className="rounded-xl border border-indigo-300 bg-white px-4 py-2.5 text-sm font-semibold text-indigo-900 hover:bg-indigo-50 disabled:opacity-50"
+              >
+                Choose folder
+              </button>
+            </div>
+          </div>
           <input
             ref={filePickerRef}
             id={uploadFileInputId}
             type="file"
             accept="image/jpeg,image/jpg,image/png,image/webp,video/mp4,video/quicktime,video/x-m4v,video/webm,audio/wav,audio/x-wav"
-            className="mt-3 block w-full text-sm text-slate-700"
+            className="sr-only"
             disabled={isAutoUploading}
             multiple
             onChange={(event) => {
               const files = event.target.files ? Array.from(event.target.files) : [];
+              event.target.value = "";
               if (files.length > 0) addFilesToQueue(files);
             }}
           />
-          <label
-            htmlFor={uploadFileInputId}
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={handleDrop}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                filePickerRef.current?.click();
-              }
+          <input
+            ref={folderPickerRef}
+            type="file"
+            className="sr-only"
+            disabled={isAutoUploading}
+            multiple
+            aria-label="Choose a folder of images and videos"
+            onChange={(event) => {
+              const files = event.target.files ? Array.from(event.target.files) : [];
+              event.target.value = "";
+              if (files.length > 0) addFilesToQueue(files);
             }}
-            role="button"
-            tabIndex={0}
-            className="mt-3 cursor-pointer rounded-xl border border-dashed border-slate-300 p-3 text-xs text-slate-600 hover:bg-slate-50"
-          >
-            Drag and drop images/videos here, or click to upload.
-          </label>
+            {...({ webkitdirectory: "" } as Record<string, string>)}
+          />
+          <p className="mt-5 text-center text-xs text-slate-500">
+            {batchBucketDragActive ? (
+              <span className="font-semibold text-indigo-800">Release to add to your batch</span>
+            ) : (
+              <span>Or drag files from your computer anywhere onto this shaded area.</span>
+            )}
+          </p>
+        </div>
           {queue.length > 0 ? (
             <div className="mt-3 space-y-2">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h3 className="text-sm font-semibold text-slate-900">Your batch</h3>
+                <p className="text-xs text-slate-500">
+                  {queue.length} file{queue.length === 1 ? "" : "s"} queued
+                </p>
+              </div>
               {invalidQueueCount > 0 ? (
                 <div className="flex items-center justify-between rounded-lg border border-rose-200 bg-rose-50 px-3 py-2">
                   <p className="text-xs text-rose-800">
@@ -2249,7 +2341,6 @@ export default function UploadPage() {
               </div>
             ) : null}
           </div>
-        </div>
 
         {role !== "PHOTOGRAPHER" && role !== "ADMIN" ? (
           <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
