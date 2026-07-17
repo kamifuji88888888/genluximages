@@ -52,20 +52,31 @@ export async function runGoogleVisionOcr(imageBuffer: Buffer): Promise<{ rawText
 
   // Two requests: DOCUMENT_TEXT_DETECTION alone can suppress TEXT_DETECTION in a single
   // request; batching both recovers dense slate text plus scene-style blocks.
-  const body = JSON.stringify({
-    requests: [
-      {
-        image: { content: base64 },
-        imageContext,
-        features: [{ type: "DOCUMENT_TEXT_DETECTION", maxResults: 1 }],
-      },
-      {
-        image: { content: base64 },
-        imageContext,
-        features: [{ type: "TEXT_DETECTION", maxResults: 1 }],
-      },
-    ],
-  });
+  const requests: Array<Record<string, unknown>> = [
+    {
+      image: { content: base64 },
+      imageContext,
+      features: [{ type: "DOCUMENT_TEXT_DETECTION", maxResults: 1 }],
+    },
+    {
+      image: { content: base64 },
+      imageContext,
+      features: [{ type: "TEXT_DETECTION", maxResults: 1 }],
+    },
+  ];
+
+  // Optional extra layer: handwriting-tuned OCR for marker/dry-erase slates.
+  // `en-t-i0-handwrit` biases the model toward Latin handwriting; kept additive so
+  // typeset backdrop reads still come through the standard passes above.
+  if (isHandwritingHintEnabled()) {
+    requests.push({
+      image: { content: base64 },
+      imageContext: { languageHints: ["en-t-i0-handwrit"] },
+      features: [{ type: "DOCUMENT_TEXT_DETECTION", maxResults: 1 }],
+    });
+  }
+
+  const body = JSON.stringify({ requests });
 
   const url = `${VISION_ANNOTATE_URL}?key=${encodeURIComponent(apiKey)}`;
   const response = await fetch(url, {
@@ -108,4 +119,11 @@ export async function runGoogleVisionOcr(imageBuffer: Buffer): Promise<{ rawText
 
 export function isGoogleVisionConfigured(): boolean {
   return Boolean(process.env.GOOGLE_CLOUD_VISION_API_KEY?.trim());
+}
+
+/** Handwriting-hinted Vision pass is on by default; set GOOGLE_VISION_HANDWRITING_HINT=0/false to disable. */
+export function isHandwritingHintEnabled(): boolean {
+  const raw = (process.env.GOOGLE_VISION_HANDWRITING_HINT ?? "").trim().toLowerCase();
+  if (raw === "") return true;
+  return !(raw === "0" || raw === "false" || raw === "no" || raw === "off");
 }
