@@ -10,6 +10,10 @@ import { getKnownSubjectsForEvent, upsertKnownSubjectForEvent } from "@/lib/subj
 import { isGoogleVisionConfigured } from "@/lib/google-vision-ocr";
 import { chooseBestGoogleSlateOcrEntry, runOcrOnImageBuffer } from "@/lib/slate-ocr";
 import { sanitizeDiagnosticCandidateName } from "@/lib/slate-ocr-text";
+import {
+  computeSlateNameConsensus,
+  correctNameAgainstRoster,
+} from "@/lib/subject-name-consensus";
 import { makePortraitReidCropDataUrl } from "@/lib/subject-match-crop";
 import { scheduleRetryNeedsManualSubjectNaming } from "@/lib/subject-retry";
 import { SUBJECT_SLATE_APPLY_MIN_CONFIDENCE } from "@/lib/subject-naming-constants";
@@ -797,10 +801,8 @@ export async function POST(request: NextRequest) {
         slateMessage = "No slate/card name detected after primary + fallback model passes.";
       }
 
-      const finalCardName = (slateCandidateName || bestCardResult.subjectName || "").trim();
-      const finalCardConfidence = Math.max(slateConfidence, bestCardResult.confidence || 0);
-      const cardWouldApply =
-        Boolean(finalCardName) && finalCardConfidence >= SUBJECT_SLATE_APPLY_MIN_CONFIDENCE;
+      const rawCardName = (slateCandidateName || bestCardResult.subjectName || "").trim();
+      const rawCardConfidence = Math.max(slateConfidence, bestCardResult.confidence || 0);
 
       const matchMin = getSubjectMatchMinConfidence();
       let knownSubjects: Awaited<ReturnType<typeof getKnownSubjectsForEvent>> = [];
@@ -823,13 +825,36 @@ export async function POST(request: NextRequest) {
         }
       }
 
+      // Roster spelling correction: snap an obvious typo to an existing attendee (Sean Jarnes -> Sean James).
+      const rosterNames = knownSubjects.map((k) => k.name);
+      const rosterCorrection = correctNameAgainstRoster(rawCardName, rosterNames);
+      const finalCardName = rosterCorrection.name || rawCardName;
+
+      // Consensus across independent signals (OCR passes, card read, face match, roster).
+      const ocrPassNames = slatePasses
+        .filter((p) => p.detected && p.candidateName.trim())
+        .map((p) => p.candidateName);
+      const consensus = computeSlateNameConsensus({
+        primaryName: finalCardName,
+        ocrPassNames,
+        cardName: bestCardResult.subjectName || slateCandidateName || "",
+        matchName: matchResult.subjectName || "",
+        rosterMatched: rosterCorrection.matched,
+      });
+
+      const effectiveCardConfidence = Math.min(
+        0.98,
+        rawCardConfidence + consensus.confidenceBoost,
+      );
+      // Auto-apply when confident on its own OR when independent signals agree (consensus).
+      const cardWouldApply =
+        Boolean(finalCardName) &&
+        (effectiveCardConfidence >= SUBJECT_SLATE_APPLY_MIN_CONFIDENCE || consensus.strong);
+
       const visualStrong = Boolean(
         matchResult.subjectName && matchResult.confidence >= matchMin,
       );
-      const cardNorm = finalCardName.toLowerCase();
-      const cardNameIsKnown =
-        cardWouldApply &&
-        knownSubjects.some((k) => k.name.trim().toLowerCase() === cardNorm);
+      const cardNameIsKnown = cardWouldApply && rosterCorrection.matched;
 
       /** Backdrop OCR often reads logos; if that string is not a known attendee but face-match is, prefer match. */
       const preferVisualOverBackdropCard =
@@ -862,8 +887,16 @@ export async function POST(request: NextRequest) {
       } else if (cardWouldApply) {
         subjectName = finalCardName;
         subjectSource = "card";
-        subjectConfidence = finalCardConfidence;
+        subjectConfidence = effectiveCardConfidence;
         slateApplied = true;
+        slateCandidateName = finalCardName;
+        if (rosterCorrection.corrected) {
+          slateMessage = `Auto-named "${finalCardName}" (corrected OCR "${rawCardName}" to a matching event attendee). Sources: ${
+            consensus.sources.join(", ") || "slate"
+          }.`;
+        } else if (consensus.sources.length > 1) {
+          slateMessage = `Auto-named "${finalCardName}" — ${consensus.sources.join(", ")} agree.`;
+        }
         if (photographerId && subjectDetectionImageDataUrl) {
           await upsertKnownSubjectForEvent({
             photographerId,
