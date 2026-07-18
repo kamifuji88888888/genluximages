@@ -112,6 +112,8 @@ export type ConsensusInput = {
   matchName?: string;
   /** Whether primaryName matched an event roster entry. */
   rosterMatched: boolean;
+  /** Whether primaryName matched the photographer verified-names dictionary. */
+  verifiedMatched?: boolean;
 };
 
 export type ConsensusResult = {
@@ -137,19 +139,25 @@ export function computeSlateNameConsensus(input: ConsensusInput): ConsensusResul
   if (cardAgrees) sources.push("card");
   const matchAgrees = Boolean(input.matchName && normalizeNameKey(input.matchName) === key);
   if (matchAgrees) sources.push("face-match");
-  if (input.rosterMatched) sources.push("event-roster");
+  if (input.verifiedMatched) sources.push("verified-names");
+  else if (input.rosterMatched) sources.push("event-roster");
 
   const agreementCount = sources.length;
   const multiOcr = ocrAgree >= 2;
 
   let confidenceBoost = 0;
-  if (input.rosterMatched) confidenceBoost += 0.2;
+  if (input.verifiedMatched) confidenceBoost += 0.22;
+  else if (input.rosterMatched) confidenceBoost += 0.2;
   if (agreementCount >= 2) confidenceBoost += 0.12;
   if (cardAgrees && matchAgrees) confidenceBoost += 0.1;
   if (multiOcr) confidenceBoost += 0.05;
   confidenceBoost = Math.min(0.35, confidenceBoost);
 
-  const strong = input.rosterMatched || agreementCount >= 2 || (matchAgrees && cardAgrees);
+  const strong =
+    Boolean(input.verifiedMatched) ||
+    input.rosterMatched ||
+    agreementCount >= 2 ||
+    (matchAgrees && cardAgrees);
 
   return { agreementCount, sources, confidenceBoost, strong };
 }

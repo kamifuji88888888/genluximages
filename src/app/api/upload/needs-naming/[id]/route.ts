@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
+import { upsertVerifiedSubjectName } from "@/lib/verified-names";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -31,7 +32,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
   const existing = await db.imageAsset.findFirst({
     where: { id, photographerId: user.id },
-    select: { id: true, subjectNamingStatus: true },
+    select: { id: true, subjectNamingStatus: true, eventSlug: true },
   });
   if (!existing) {
     return NextResponse.json({ ok: false, message: "Image not found." }, { status: 404 });
@@ -46,5 +47,12 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     },
   });
 
-  return NextResponse.json({ ok: true, message: "Title saved." });
+  await upsertVerifiedSubjectName({
+    photographerId: user.id,
+    name: title,
+    source: "manual",
+    eventSlug: existing.eventSlug,
+  });
+
+  return NextResponse.json({ ok: true, message: "Title saved and added to your verified names dictionary." });
 }

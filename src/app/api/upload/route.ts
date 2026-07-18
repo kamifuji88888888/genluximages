@@ -3,6 +3,7 @@ import { Prisma, SubjectNamingStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { validateMediaFilename } from "@/lib/media-filename";
 import { decodeSession, SESSION_COOKIE_NAME } from "@/lib/session";
+import { upsertVerifiedSubjectName } from "@/lib/verified-names";
 
 export async function POST(request: NextRequest) {
   const session = decodeSession(request.cookies.get(SESSION_COOKIE_NAME)?.value ?? null);
@@ -135,6 +136,16 @@ export async function POST(request: NextRequest) {
         subjectNamingStatus: subjectNamingStatus ?? null,
         subjectNamingConfidence: subjectNamingConfidence ?? null,
       },
+    });
+
+    // Photographer-confirmed title becomes a spelling source for future OCR (e.g. Mary Hellmund).
+    const verifySource =
+      subjectNamingStatus === "manual_resolved" ? "manual" : "catalog";
+    await upsertVerifiedSubjectName({
+      photographerId: photographer.id,
+      name: body.title,
+      source: verifySource,
+      eventSlug: body.eventSlug,
     });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {

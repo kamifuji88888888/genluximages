@@ -77,6 +77,7 @@ model User {
   ownedGalleries SavedGallery[] @relation("GalleryOwner")
   galleryMemberships SavedGalleryMember[]
   eventSubjectReferences EventSubjectReference[]
+  verifiedSubjectNames   VerifiedSubjectName[]
 }
 
 /// Saved when a subject is identified from a slate/card; used to visually match later photos without a board.
@@ -93,6 +94,25 @@ model EventSubjectReference {
 
   @@unique([photographerId, eventSlug, subjectKey])
   @@index([photographerId, eventSlug])
+}
+
+/// Photographer-confirmed spellings used to correct OCR before auto-naming (grows when titles are saved/corrected).
+model VerifiedSubjectName {
+  id                 String   @id @default(cuid())
+  photographerId     String
+  subjectKey         String
+  subjectDisplayName String
+  /// How this spelling was confirmed: catalog submit, Name queue, or photographer edit.
+  source             String   @default("catalog")
+  /// Optional last event context (not part of uniqueness — names apply across events).
+  lastEventSlug      String?
+  timesUsed          Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  photographer       User     @relation(fields: [photographerId], references: [id], onDelete: Cascade)
+
+  @@unique([photographerId, subjectKey])
+  @@index([photographerId])
 }
 
 model ImageAsset {
