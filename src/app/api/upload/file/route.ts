@@ -20,10 +20,11 @@ import {
 } from "@/lib/verified-names";
 import { makePortraitReidCropDataUrl } from "@/lib/subject-match-crop";
 import { scheduleRetryNeedsManualSubjectNaming } from "@/lib/subject-retry";
-import { SUBJECT_SLATE_APPLY_MIN_CONFIDENCE } from "@/lib/subject-naming-constants";
+import { SUBJECT_SLATE_APPLY_MIN_CONFIDENCE, SUBJECT_SLATE_ESCALATION_MAX_CONFIDENCE } from "@/lib/subject-naming-constants";
 import {
   detectSubjectNameFromCard,
   extractTitleFromVoiceTranscript,
+  getSlateEscalationModel,
   getSubjectMatchMinConfidence,
   matchSubjectAgainstKnown,
   rescueBoardNameFromText,
@@ -608,15 +609,24 @@ export async function POST(request: NextRequest) {
           try {
             const googleOcrRuns = await Promise.all(
               googleTasks.map(async ({ pass, buffer }) => {
-                const { candidateName, rawText, provider } = await runOcrOnImageBuffer(buffer);
+                const { candidateName, rawText, provider, boxBonus } = await runOcrOnImageBuffer(buffer);
+                const conf = candidateName
+                  ? Math.min(0.95, 0.82 + Math.max(0, (boxBonus || 0)) * 0.02)
+                  : 0;
                 slatePasses.push({
                   pass,
                   model: "google-vision",
                   detected: Boolean(candidateName?.trim()),
                   candidateName: candidateName || "",
-                  confidence: candidateName ? 0.88 : 0,
+                  confidence: conf,
                 });
-                return { pass, candidateName: candidateName || "", rawText, provider };
+                return {
+                  pass,
+                  candidateName: candidateName || "",
+                  rawText,
+                  provider,
+                  boxBonus: boxBonus || 0,
+                };
               })
             );
             const visionEntries = googleOcrRuns.filter((r) => r.provider === "google");
@@ -625,7 +635,10 @@ export async function POST(request: NextRequest) {
               googleSlateResult = { name: bestGoogle.candidateName, pass: bestGoogle.pass };
               slateDetected = true;
               slateCandidateName = bestGoogle.candidateName;
-              slateConfidence = 0.9;
+              slateConfidence = Math.min(
+                0.95,
+                0.86 + Math.max(0, bestGoogle.boxBonus || 0) * 0.015,
+              );
               slateModelUsed = `google-vision (${bestGoogle.pass})`;
               slateDetectionPass = bestGoogle.pass;
               slateMessage = `Slate/whiteboard text read via Google Vision (${bestGoogle.pass.replace(/_/g, " ")}).`;
@@ -805,8 +818,72 @@ export async function POST(request: NextRequest) {
         slateMessage = "No slate/card name detected after primary + fallback model passes.";
       }
 
-      const rawCardName = (slateCandidateName || bestCardResult.subjectName || "").trim();
-      const rawCardConfidence = Math.max(slateConfidence, bestCardResult.confidence || 0);
+      let rawCardName = (slateCandidateName || bestCardResult.subjectName || "").trim();
+      let rawCardConfidence = Math.max(slateConfidence, bestCardResult.confidence || 0);
+
+      // Escalate ambiguous / low-confidence slates to a stronger vision model (default gpt-5-mini).
+      const escalationModel = getSlateEscalationModel();
+      const escalateNow =
+        Boolean(escalationModel) &&
+        escalationModel !== primarySlateModel &&
+        (!rawCardName || rawCardConfidence < SUBJECT_SLATE_ESCALATION_MAX_CONFIDENCE);
+
+      if (escalateNow && escalationModel) {
+        const escalatePassOrder = [
+          "whiteboard_enhanced_foreground_slate",
+          "whiteboard_enhanced_foreground_slate_threshold",
+          "focused_foreground_slate",
+          "whiteboard_enhanced_foreground_slate_left",
+          "focused_foreground_slate_left",
+          "whiteboard_enhanced_board_candidate",
+          "focused_board_candidate",
+          "whiteboard_enhanced_tight_center",
+          "focused_tight_center",
+          "full_frame",
+        ];
+        const passInputMap = new Map(slatePassInputs.map((e) => [e.pass, e.imageDataUrl]));
+        let escalateImage = subjectDetectionImageDataUrl;
+        let escalatePass: SlatePassName = "full_frame";
+        for (const pass of escalatePassOrder) {
+          const url = passInputMap.get(pass);
+          if (url) {
+            escalateImage = url;
+            escalatePass = pass;
+            break;
+          }
+        }
+        try {
+          const escalated = await detectSubjectNameFromCard({
+            filename: originalName,
+            imageDataUrl: escalateImage,
+            modelOverride: escalationModel,
+            imageDetail: "high",
+          });
+          slatePasses.push({
+            pass: escalatePass,
+            model: `${escalationModel} (escalate)`,
+            detected: Boolean(escalated.subjectName),
+            candidateName: escalated.subjectName || "",
+            confidence: escalated.confidence || 0,
+          });
+          if (
+            escalated.subjectName &&
+            (escalated.confidence > rawCardConfidence || !rawCardName)
+          ) {
+            slateDetected = true;
+            slateCandidateName = escalated.subjectName;
+            slateConfidence = Math.max(rawCardConfidence, escalated.confidence);
+            rawCardName = escalated.subjectName.trim();
+            rawCardConfidence = slateConfidence;
+            slateDetectionPass = escalatePass;
+            slateModelUsed = escalationModel;
+            slateFallbackAttempted = true;
+            slateMessage = `Escalated ambiguous slate to ${escalationModel} (${String(escalatePass).replace(/_/g, " ")}).`;
+          }
+        } catch (e) {
+          console.warn("Slate escalation model failed:", e);
+        }
+      }
 
       const matchMin = getSubjectMatchMinConfidence();
       let knownSubjects: Awaited<ReturnType<typeof getKnownSubjectsForEvent>> = [];

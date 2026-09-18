@@ -3,11 +3,13 @@
  * and run OCR on an image buffer (Google Cloud Vision only; no Tesseract on server).
  * OpenAI slate passes in upload-ai state a handwriting/marker-on-handheld-board preference; Vision
  * here is raw OCR—ranking and backdrop penalties in this file still apply.
+ * Word bounding boxes (when present) bias toward compact foreground clusters vs step-and-repeat.
  */
 import sharp from "sharp";
 import {
   isGoogleVisionConfigured,
   runGoogleVisionOcr,
+  type VisionWordBox,
 } from "@/lib/google-vision-ocr";
 
 const LABEL_PREFIX =
@@ -257,6 +259,98 @@ export function pickNameFromOcrText(raw: string): string {
 }
 
 /**
+ * Prefer text in the handheld-slate band (mid/lower center) over upper step-and-repeat logos.
+ * Returns a bonus roughly in [-4, +5].
+ */
+export function foregroundSlateLocationBonus(cx: number, cy: number): number {
+  let score = 0;
+  // Torso / hands zone for held boards
+  if (cy >= 0.32 && cy <= 0.88) score += 3;
+  else if (cy >= 0.22 && cy < 0.32) score += 1;
+  else if (cy < 0.18) score -= 3.5; // typical logo strip
+  else score -= 1;
+
+  if (cx >= 0.18 && cx <= 0.82) score += 1.5;
+  else if (cx < 0.08 || cx > 0.92) score -= 1.5;
+  return score;
+}
+
+/**
+ * Build a person-name candidate from Vision word boxes, preferring compact foreground clusters.
+ */
+export function pickNameFromVisionWords(
+  words: VisionWordBox[],
+  fallbackRawText: string,
+): { name: string; score: number; boxBonus: number } {
+  const tokenWords = words
+    .map((w) => ({
+      ...w,
+      clean: w.text.replace(/[^a-zA-Z'-]/g, "").trim(),
+    }))
+    .filter((w) => TOKEN.test(w.clean) && w.clean.length >= 2 && w.clean.length <= 22);
+
+  if (tokenWords.length === 0) {
+    const fallback = pickNameFromOcrTextWithScore(fallbackRawText);
+    return { ...fallback, boxBonus: 0 };
+  }
+
+  // Group into approximate lines by vertical proximity
+  const sorted = [...tokenWords].sort((a, b) => a.cy - b.cy || a.cx - b.cx);
+  const lines: typeof tokenWords[] = [];
+  for (const word of sorted) {
+    const line = lines.find((group) => Math.abs(group[0].cy - word.cy) < 0.045);
+    if (line) line.push(word);
+    else lines.push([word]);
+  }
+
+  let best: { name: string; score: number; boxBonus: number } = {
+    name: "",
+    score: 0,
+    boxBonus: 0,
+  };
+
+  for (const line of lines) {
+    const ordered = [...line].sort((a, b) => a.cx - b.cx);
+    for (let i = 0; i < ordered.length; i += 1) {
+      for (let len = 1; len <= 3 && i + len <= ordered.length; len += 1) {
+        const slice = ordered.slice(i, i + len);
+        let parts = slice.map((w) => w.clean);
+        parts = stripLeadingOcrNoiseTokens(parts);
+        if (parts.length === 0) continue;
+        if (parts.length === 1 && (parts[0].length < 4 || parts[0].length > 18)) continue;
+
+        const nameScore = scoreNameParts(parts, parts.join(" "));
+        if (nameScore < 0) continue;
+
+        const cx =
+          slice.reduce((sum, w) => sum + w.cx, 0) / Math.max(1, slice.length);
+        const cy =
+          slice.reduce((sum, w) => sum + w.cy, 0) / Math.max(1, slice.length);
+        const spanX = Math.max(...slice.map((w) => w.cx)) - Math.min(...slice.map((w) => w.cx));
+        // Compact clusters (handheld board) beat wide logo strips
+        const compactBonus = spanX < 0.35 ? 2 : spanX < 0.55 ? 0.5 : -2.5;
+        const locBonus = foregroundSlateLocationBonus(cx, cy);
+        const confBonus =
+          slice.reduce((sum, w) => sum + (w.confidence || 0), 0) / slice.length;
+        const boxBonus = locBonus + compactBonus + confBonus;
+        const total = nameScore + boxBonus;
+        const formatted = formatNameParts(parts);
+        if (isLikelySponsorNameArtifact(formatted, fallbackRawText)) continue;
+        if (total > best.score) {
+          best = { name: formatted, score: total, boxBonus };
+        }
+      }
+    }
+  }
+
+  if (!best.name) {
+    const fallback = pickNameFromOcrTextWithScore(fallbackRawText);
+    return { ...fallback, boxBonus: 0 };
+  }
+  return best;
+}
+
+/**
  * Subject-held slates sit in the lower-mid frame (torso/hands); step-and-repeat fills the upper field.
  * Bias OCR fusion toward foreground-targeted passes and away from whole-frame reads.
  */
@@ -270,10 +364,14 @@ export function slatePassForegroundDepthBonus(pass: string): number {
   return 0;
 }
 
-export function chooseBestGoogleSlateOcrEntry<T extends { pass: string; candidateName: string; rawText: string }>(
-  entries: T[],
-  passPreferenceOrder: string[]
-): T | null {
+export function chooseBestGoogleSlateOcrEntry<
+  T extends {
+    pass: string;
+    candidateName: string;
+    rawText: string;
+    boxBonus?: number;
+  },
+>(entries: T[], passPreferenceOrder: string[]): T | null {
   let withNames = entries.filter((e) => e.candidateName.trim());
   if (withNames.length === 0) return null;
 
@@ -297,16 +395,17 @@ export function chooseBestGoogleSlateOcrEntry<T extends { pass: string; candidat
     return i === -1 ? 999 : i;
   };
 
-  const effective = (raw: string, parseScore: number, pass: string) =>
+  const effective = (raw: string, parseScore: number, pass: string, boxBonus = 0) =>
     parseScore -
     Math.min(12, backdropOcrNoiseHits(raw)) * 1.25 +
-    slatePassForegroundDepthBonus(pass);
+    slatePassForegroundDepthBonus(pass) +
+    boxBonus * 0.35;
 
   return [...withNames].sort((a, b) => {
     const sa = pickNameFromOcrTextWithScore(a.rawText);
     const sb = pickNameFromOcrTextWithScore(b.rawText);
-    const ea = effective(a.rawText, sa.score, a.pass);
-    const eb = effective(b.rawText, sb.score, b.pass);
+    const ea = effective(a.rawText, sa.score, a.pass, a.boxBonus || 0);
+    const eb = effective(b.rawText, sb.score, b.pass, b.boxBonus || 0);
     if (eb !== ea) return eb - ea;
     const na = backdropOcrNoiseHits(a.rawText);
     const nb = backdropOcrNoiseHits(b.rawText);
@@ -320,16 +419,34 @@ export function chooseBestGoogleSlateOcrEntry<T extends { pass: string; candidat
 }
 
 export async function runOcrOnImageBuffer(
-  imageBuffer: Buffer
-): Promise<{ candidateName: string; rawText: string; provider?: "google" | "tesseract" }> {
+  imageBuffer: Buffer,
+): Promise<{
+  candidateName: string;
+  rawText: string;
+  provider?: "google" | "tesseract";
+  boxBonus?: number;
+  words?: VisionWordBox[];
+}> {
   if (!isGoogleVisionConfigured()) {
     return { candidateName: "", rawText: "" };
   }
   try {
     const prepared = await prepareImageBufferForSlateOcr(imageBuffer);
-    const { rawText } = await runGoogleVisionOcr(prepared);
-    const candidateName = pickNameFromOcrText(rawText);
-    return { candidateName, rawText, provider: "google" };
+    const { rawText, words } = await runGoogleVisionOcr(prepared);
+    const fromBoxes = pickNameFromVisionWords(words, rawText);
+    const fromText = pickNameFromOcrTextWithScore(rawText);
+    // Prefer box-aware pick when it found a name; otherwise fall back to line OCR.
+    const chosen =
+      fromBoxes.name && fromBoxes.score >= fromText.score
+        ? fromBoxes
+        : { name: fromText.name, score: fromText.score, boxBonus: fromBoxes.boxBonus || 0 };
+    return {
+      candidateName: chosen.name,
+      rawText,
+      provider: "google",
+      boxBonus: chosen.boxBonus,
+      words,
+    };
   } catch (e) {
     console.error("Google Vision OCR failed:", e);
     return { candidateName: "", rawText: "" };

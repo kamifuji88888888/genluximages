@@ -71,6 +71,22 @@ export function getSubjectMatchMinConfidence(): number {
   return SUBJECT_MATCH_MIN_CONFIDENCE_DEFAULT;
 }
 
+/**
+ * Stronger vision model for ambiguous slate crops (default gpt-5-mini).
+ * Set AI_UPLOAD_SLATE_ESCALATION_MODEL=off to disable.
+ */
+export function getSlateEscalationModel(): string | null {
+  const raw = (process.env.AI_UPLOAD_SLATE_ESCALATION_MODEL ?? "").trim();
+  if (!raw) return "gpt-5-mini";
+  const lower = raw.toLowerCase();
+  if (lower === "0" || lower === "false" || lower === "off" || lower === "none") return null;
+  return raw;
+}
+
+export function isSlateEscalationEnabled(): boolean {
+  return Boolean(getSlateEscalationModel());
+}
+
 export type SubjectDetectionResult = {
   subjectName?: string;
   confidence: number;
@@ -436,6 +452,8 @@ export async function detectSubjectNameFromCard(args: {
   filename: string;
   imageDataUrl?: string;
   modelOverride?: string;
+  /** Higher image detail for hard handwriting / tiny marker text. */
+  imageDetail?: "auto" | "low" | "high" | "original";
 }): Promise<SubjectDetectionResult> {
   if (!args.imageDataUrl) return { confidence: 0, source: "none" };
   if ((process.env.AI_UPLOAD_PROVIDER || "").toLowerCase() !== "openai") {
@@ -444,6 +462,7 @@ export async function detectSubjectNameFromCard(args: {
   const apiKey = process.env.OPENAI_API_KEY || "";
   if (!apiKey) return { confidence: 0, source: "none" };
   const model = args.modelOverride || process.env.AI_UPLOAD_MODEL || "gpt-4.1-mini";
+  const imageDetail = args.imageDetail || "auto";
 
   const response = await fetchWithTimeout("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -467,7 +486,11 @@ export async function detectSubjectNameFromCard(args: {
           role: "user",
           content: [
             { type: "input_text", text: `Filename: ${args.filename}` },
-            { type: "input_image", image_url: args.imageDataUrl },
+            {
+              type: "input_image",
+              image_url: args.imageDataUrl,
+              detail: imageDetail,
+            },
           ],
         },
       ],
