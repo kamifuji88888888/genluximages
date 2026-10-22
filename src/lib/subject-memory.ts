@@ -22,6 +22,8 @@ function subjectKey(name: string) {
 export type KnownSubjectForMatch = {
   name: string;
   referenceImageDataUrl: string;
+  /** Tight face crop when available — preferred for visual re-ID. */
+  faceCropDataUrl?: string;
 };
 
 export async function getKnownSubjectsForEvent(args: {
@@ -37,6 +39,7 @@ export async function getKnownSubjectsForEvent(args: {
   return rows.map((r) => ({
     name: r.subjectDisplayName,
     referenceImageDataUrl: r.referenceDataUrl,
+    faceCropDataUrl: r.faceCropDataUrl || undefined,
   }));
 }
 
@@ -45,6 +48,7 @@ export async function upsertKnownSubjectForEvent(args: {
   eventSlug: string;
   name: string;
   referenceImageDataUrl: string;
+  faceCropDataUrl?: string;
 }) {
   const slug = normalizeEventSlug(args.eventSlug);
   const display = normalizeName(args.name);
@@ -52,6 +56,10 @@ export async function upsertKnownSubjectForEvent(args: {
   let dataUrl = args.referenceImageDataUrl;
   if (dataUrl.length > MAX_REFERENCE_DATA_URL_LENGTH) {
     dataUrl = dataUrl.slice(0, MAX_REFERENCE_DATA_URL_LENGTH);
+  }
+  let faceUrl = args.faceCropDataUrl?.trim() || undefined;
+  if (faceUrl && faceUrl.length > MAX_REFERENCE_DATA_URL_LENGTH) {
+    faceUrl = faceUrl.slice(0, MAX_REFERENCE_DATA_URL_LENGTH);
   }
 
   await db.eventSubjectReference.upsert({
@@ -68,10 +76,12 @@ export async function upsertKnownSubjectForEvent(args: {
       subjectKey: key,
       subjectDisplayName: display,
       referenceDataUrl: dataUrl,
+      faceCropDataUrl: faceUrl,
     },
     update: {
       subjectDisplayName: display,
       referenceDataUrl: dataUrl,
+      ...(faceUrl ? { faceCropDataUrl: faceUrl } : {}),
     },
   });
 

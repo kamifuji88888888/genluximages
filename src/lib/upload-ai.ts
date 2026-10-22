@@ -61,6 +61,8 @@ const SYSTEM_RESCUE_BOARD_TEXT =
 export type KnownSubjectReference = {
   name: string;
   referenceImageDataUrl: string;
+  /** Tight face crop when available — preferred over full-frame for re-ID. */
+  faceCropDataUrl?: string;
 };
 
 /** Min model confidence to auto-apply a visual match when no slate name (default 0.8). */
@@ -612,6 +614,8 @@ export async function matchSubjectAgainstKnown(args: {
   imageDataUrl?: string;
   /** Optional tighter upper-body crop of the same frame (reduces step-and-repeat noise). */
   portraitCropDataUrl?: string;
+  /** Optional tight face crop (Google Vision FACE_DETECTION) — strongest re-ID signal. */
+  faceCropDataUrl?: string;
   knownSubjects: KnownSubjectReference[];
 }): Promise<SubjectDetectionResult> {
   if (!args.imageDataUrl || args.knownSubjects.length === 0) return { confidence: 0, source: "none" };
@@ -623,24 +627,50 @@ export async function matchSubjectAgainstKnown(args: {
   const model = process.env.AI_UPLOAD_MODEL || "gpt-4.1-mini";
   const candidates = args.knownSubjects.slice(0, 8);
 
+  const faceCropUrl = args.faceCropDataUrl?.trim() || "";
   const portraitCropUrl = args.portraitCropDataUrl?.trim() || "";
+  const hasFaceCrop = faceCropUrl.length > 0;
   const hasPortraitCrop = portraitCropUrl.length > 0;
-  const intro = hasPortraitCrop
-    ? "The first image is the full new event photo; the second is a tighter crop of the same shot (face and upper body). Both show the same candidate. Ignore step-and-repeat logos and backdrop text—they are not the person's name. The following pairs are (name, reference photo) for people already identified from earlier images (usually from a slate). Decide if the candidate is the same person as exactly one reference, by face, hair, glasses, skin tone, build, outfit, and pose. If none match clearly, return none."
-    : "The first image is a new event photo; the main subject is usually the person in the foreground. Ignore step-and-repeat logos and backdrop text—they are not the person's name. The following pairs are (name, reference photo) for people already identified from earlier images (usually from a slate). Decide if the new photo shows the same person as exactly one reference, by face, hair, glasses, skin tone, build, outfit, and pose. If none match clearly, return none.";
+  const galleryHasFaceCrops = candidates.some((c) => Boolean(c.faceCropDataUrl?.trim()));
+
+  const intro = hasFaceCrop
+    ? "You are matching faces across event photos. The first image is a tight FACE CROP of the new candidate. Each reference is a named person already identified (usually from a slate photo)—prefer their face crop when provided. Match only by facial identity (eyes, nose, mouth, bone structure, hairline, skin tone, glasses). Ignore clothing and backdrop. If none match clearly, return none."
+    : hasPortraitCrop
+      ? "The first image is the full new event photo; the second is a tighter crop of the same shot (face and upper body). Both show the same candidate. Ignore step-and-repeat logos and backdrop text—they are not the person's name. The following pairs are (name, reference photo) for people already identified from earlier images (usually from a slate). Decide if the candidate is the same person as exactly one reference, by face, hair, glasses, skin tone, build, outfit, and pose. If none match clearly, return none."
+      : "The first image is a new event photo; the main subject is usually the person in the foreground. Ignore step-and-repeat logos and backdrop text—they are not the person's name. The following pairs are (name, reference photo) for people already identified from earlier images (usually from a slate). Decide if the new photo shows the same person as exactly one reference, by face, hair, glasses, skin tone, build, outfit, and pose. If none match clearly, return none.";
 
   const content: Array<{ type: "input_text" | "input_image"; text?: string; image_url?: string }> = [
     { type: "input_text", text: intro },
-    { type: "input_text", text: "New photo (candidate, full frame):" },
-    { type: "input_image", image_url: args.imageDataUrl },
   ];
-  if (hasPortraitCrop) {
-    content.push({ type: "input_text", text: "Same candidate (portrait crop):" });
-    content.push({ type: "input_image", image_url: portraitCropUrl });
+
+  if (hasFaceCrop) {
+    content.push({ type: "input_text", text: "New candidate (face crop):" });
+    content.push({ type: "input_image", image_url: faceCropUrl });
+    // Keep full frame as weak context only when gallery lacks face crops
+    if (!galleryHasFaceCrops) {
+      content.push({ type: "input_text", text: "Same candidate (full frame, context only):" });
+      content.push({ type: "input_image", image_url: args.imageDataUrl });
+    }
+  } else {
+    content.push({ type: "input_text", text: "New photo (candidate, full frame):" });
+    content.push({ type: "input_image", image_url: args.imageDataUrl });
+    if (hasPortraitCrop) {
+      content.push({ type: "input_text", text: "Same candidate (portrait crop):" });
+      content.push({ type: "input_image", image_url: portraitCropUrl });
+    }
   }
+
   for (const subject of candidates) {
-    content.push({ type: "input_text", text: `Reference — ${subject.name}:` });
-    content.push({ type: "input_image", image_url: subject.referenceImageDataUrl });
+    const refFace = subject.faceCropDataUrl?.trim();
+    const refImage =
+      hasFaceCrop && refFace
+        ? refFace
+        : subject.referenceImageDataUrl;
+    content.push({
+      type: "input_text",
+      text: `Reference — ${subject.name}${refFace && hasFaceCrop ? " (face crop)" : ""}:`,
+    });
+    content.push({ type: "input_image", image_url: refImage });
   }
 
   const response = await fetchWithTimeout("https://api.openai.com/v1/responses", {
@@ -657,7 +687,9 @@ export async function matchSubjectAgainstKnown(args: {
           content: [
             {
               type: "input_text",
-              text: "You re-identify event attendees across photos. Reference images were labeled with a name (often from a slate in that shot). The candidate may be a different pose, crop, or angle, may include glasses, and may have no slate—compare the foreground person only; ignore backdrop branding. Match only if it is clearly the same individual. If unsure or it could be a different person, return matchedName \"none\" and confidence 0. Return JSON only.",
+              text: hasFaceCrop
+                ? "You re-identify event attendees by FACE only. References were labeled with a name (often from a slate). Compare facial identity across crops; ignore outfits, poses, and branding. Match only if it is clearly the same individual. If unsure, return matchedName \"none\" and confidence 0. Return JSON only."
+                : "You re-identify event attendees across photos. Reference images were labeled with a name (often from a slate in that shot). The candidate may be a different pose, crop, or angle, may include glasses, and may have no slate—compare the foreground person only; ignore backdrop branding. Match only if it is clearly the same individual. If unsure or it could be a different person, return matchedName \"none\" and confidence 0. Return JSON only.",
             },
           ],
         },
@@ -695,9 +727,12 @@ export async function matchSubjectAgainstKnown(args: {
       (c) => matchNorm.includes(c.name.toLowerCase()) || c.name.toLowerCase().includes(matchNorm),
     );
   if (!chosen) return { confidence: 0, source: "none" };
+  // Slight confidence boost when both sides used face crops (cleaner signal)
+  const faceBoost =
+    hasFaceCrop && Boolean(chosen.faceCropDataUrl?.trim()) ? 0.03 : 0;
   return {
     subjectName: chosen.name,
-    confidence: Math.max(0, Math.min(1, parsed.confidence || 0)),
+    confidence: Math.max(0, Math.min(1, (parsed.confidence || 0) + faceBoost)),
     source: "match",
   };
 }

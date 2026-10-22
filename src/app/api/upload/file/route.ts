@@ -18,6 +18,7 @@ import {
   getVerifiedNamesForPhotographer,
   recordVerifiedNameUse,
 } from "@/lib/verified-names";
+import { extractLargestFaceCrop } from "@/lib/face-gallery";
 import { makePortraitReidCropDataUrl } from "@/lib/subject-match-crop";
 import { scheduleRetryNeedsManualSubjectNaming } from "@/lib/subject-retry";
 import { SUBJECT_SLATE_APPLY_MIN_CONFIDENCE, SUBJECT_SLATE_ESCALATION_MAX_CONFIDENCE } from "@/lib/subject-naming-constants";
@@ -912,6 +913,9 @@ export async function POST(request: NextRequest) {
         confidence: 0,
         source: "none",
       };
+      // Face crop for gallery matching (Google Vision FACE_DETECTION when key is set).
+      const candidateFaceCrop = await extractLargestFaceCrop(inputBytes);
+
       if (photographerId && subjectDetectionImageDataUrl) {
         knownSubjects = await getKnownSubjectsForEvent({
           photographerId,
@@ -922,6 +926,7 @@ export async function POST(request: NextRequest) {
           matchResult = await matchSubjectAgainstKnown({
             imageDataUrl: subjectDetectionImageDataUrl,
             portraitCropDataUrl: portraitReidCrop,
+            faceCropDataUrl: candidateFaceCrop?.dataUrl,
             knownSubjects,
           });
         }
@@ -993,6 +998,7 @@ export async function POST(request: NextRequest) {
           eventSlug: eventSlugForSubjects,
           name: subjectName,
           referenceImageDataUrl: subjectDetectionImageDataUrl,
+          faceCropDataUrl: candidateFaceCrop?.dataUrl,
         });
         scheduleRetryNeedsManualSubjectNaming({
           photographerId,
@@ -1021,6 +1027,7 @@ export async function POST(request: NextRequest) {
             eventSlug: eventSlugForSubjects,
             name: subjectName,
             referenceImageDataUrl: subjectDetectionImageDataUrl,
+            faceCropDataUrl: candidateFaceCrop?.dataUrl,
           });
           scheduleRetryNeedsManualSubjectNaming({
             photographerId,
@@ -1031,7 +1038,17 @@ export async function POST(request: NextRequest) {
         subjectName = matchResult.subjectName;
         subjectSource = "match";
         subjectConfidence = matchResult.confidence;
-        slateMessage = `No readable slate in this image; matched "${matchResult.subjectName}" from people you already tagged for this event (visual match).`;
+        slateMessage = candidateFaceCrop
+          ? `No readable slate in this image; matched "${matchResult.subjectName}" from people you already tagged for this event (face gallery match).`
+          : `No readable slate in this image; matched "${matchResult.subjectName}" from people you already tagged for this event (visual match).`;
+        // Refresh gallery face crop when we re-ID without a slate
+        await upsertKnownSubjectForEvent({
+          photographerId,
+          eventSlug: eventSlugForSubjects,
+          name: subjectName,
+          referenceImageDataUrl: subjectDetectionImageDataUrl,
+          faceCropDataUrl: candidateFaceCrop?.dataUrl,
+        });
       }
     } catch (err) {
       console.error("Slate/card pipeline error:", err);

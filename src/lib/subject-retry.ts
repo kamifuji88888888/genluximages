@@ -3,6 +3,7 @@
  * older catalog rows still in needs_manual for the same event + photographer.
  */
 import { db } from "@/lib/db";
+import { extractLargestFaceCrop } from "@/lib/face-gallery";
 import { getKnownSubjectsForEvent } from "@/lib/subject-memory";
 import { makePortraitReidCropDataUrl } from "@/lib/subject-match-crop";
 import {
@@ -89,9 +90,11 @@ export async function retryNeedsManualSubjectNaming(args: {
     if (!preview) continue;
 
     const portraitCrop = await makePortraitReidCropDataUrl(preview.buffer);
+    const faceCrop = await extractLargestFaceCrop(preview.buffer);
     const match = await matchSubjectAgainstKnown({
       imageDataUrl: preview.dataUrl,
       portraitCropDataUrl: portraitCrop,
+      faceCropDataUrl: faceCrop?.dataUrl,
       knownSubjects: known,
     });
 
