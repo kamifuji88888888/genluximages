@@ -222,7 +222,11 @@ export async function runGoogleVisionOcr(
       }
     }
   }
-  const rawText = mergeVisionTextLayers(docLayer, sceneLayer);
+  // Prefer DOCUMENT_TEXT_DETECTION for name parsing (better on handwriting / board text).
+  // Keep scene TEXT_DETECTION as a supplement when it adds unique tokens.
+  const rawText = docLayer
+    ? mergeVisionTextLayers(docLayer, sceneLayer)
+    : sceneLayer;
   return { rawText, words: Array.from(wordsByKey.values()) };
 }
 

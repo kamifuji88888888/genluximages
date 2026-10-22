@@ -467,10 +467,16 @@ export default function UploadPage() {
         return "focused tight center";
       case "focused_tight_left":
         return "focused tight left";
+      case "focused_lower_slate":
+        return "lower-mid slate band";
       case "focused_foreground_slate":
         return "foreground slate (center)";
       case "focused_foreground_slate_left":
         return "foreground slate (left-held)";
+      case "whiteboard_enhanced_lower_slate":
+        return "lower-mid slate enhanced";
+      case "whiteboard_enhanced_lower_slate_threshold":
+        return "lower-mid slate threshold";
       case "whiteboard_enhanced_foreground_slate":
         return "foreground slate enhanced (center)";
       case "whiteboard_enhanced_foreground_slate_left":

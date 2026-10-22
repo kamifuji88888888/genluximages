@@ -260,17 +260,20 @@ export function pickNameFromOcrText(raw: string): string {
 
 /**
  * Prefer text in the handheld-slate band (mid/lower center) over upper step-and-repeat logos.
- * Returns a bonus roughly in [-4, +5].
+ * Returns a bonus roughly in [-4, +6.5].
  */
 export function foregroundSlateLocationBonus(cx: number, cy: number): number {
   let score = 0;
-  // Torso / hands zone for held boards
-  if (cy >= 0.32 && cy <= 0.88) score += 3;
+  // Classic held-board band (hands / lower torso) — strongest preference
+  if (cy >= 0.4 && cy <= 0.78) score += 4.5;
+  else if (cy >= 0.32 && cy < 0.4) score += 3;
+  else if (cy > 0.78 && cy <= 0.9) score += 2;
   else if (cy >= 0.22 && cy < 0.32) score += 1;
   else if (cy < 0.18) score -= 3.5; // typical logo strip
   else score -= 1;
 
-  if (cx >= 0.18 && cx <= 0.82) score += 1.5;
+  if (cx >= 0.22 && cx <= 0.78) score += 2;
+  else if (cx >= 0.18 && cx <= 0.82) score += 1.5;
   else if (cx < 0.08 || cx > 0.92) score -= 1.5;
   return score;
 }
@@ -358,6 +361,7 @@ export function slatePassForegroundDepthBonus(pass: string): number {
   const p = pass.toLowerCase();
   if (p === "full_frame") return -3;
   if (p === "whiteboard_enhanced_full") return -1.5;
+  if (p.includes("lower_slate")) return 5;
   if (p.includes("foreground_slate")) return 4;
   if (p.includes("board_candidate")) return 0.5;
   if (p.startsWith("focused_") || p.startsWith("whiteboard_enhanced_")) return 2;

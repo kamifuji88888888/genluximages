@@ -416,6 +416,15 @@ export async function POST(request: NextRequest) {
         heightRatio: number;
       }> = [
         {
+          // Tight lower-mid band where held name boards usually sit
+          pass: "focused_lower_slate",
+          enhancedPass: "whiteboard_enhanced_lower_slate",
+          leftRatio: 0.2,
+          topRatio: 0.42,
+          widthRatio: 0.6,
+          heightRatio: 0.38,
+        },
+        {
           pass: "focused_foreground_slate",
           enhancedPass: "whiteboard_enhanced_foreground_slate",
           leftRatio: 0.18,
@@ -573,6 +582,9 @@ export async function POST(request: NextRequest) {
       if (isGoogleVisionConfigured()) {
         const passMap = new Map(slatePassInputs.map((e) => [e.pass, e.imageDataUrl]));
         const googleSlatePassOrder: SlatePassName[] = [
+          "whiteboard_enhanced_lower_slate",
+          "whiteboard_enhanced_lower_slate_threshold",
+          "focused_lower_slate",
           "whiteboard_enhanced_foreground_slate",
           "whiteboard_enhanced_foreground_slate_threshold",
           "focused_foreground_slate",
@@ -658,6 +670,9 @@ export async function POST(request: NextRequest) {
         const passResults: SlatePassResult[] = [];
 
         const modelPassPriority: SlatePassName[] = [
+          "whiteboard_enhanced_lower_slate",
+          "whiteboard_enhanced_lower_slate_threshold",
+          "focused_lower_slate",
           "whiteboard_enhanced_foreground_slate",
           "whiteboard_enhanced_foreground_slate_threshold",
           "focused_foreground_slate",
@@ -748,6 +763,9 @@ export async function POST(request: NextRequest) {
 
       if (!bestCardResult.subjectName) {
         const rescuePassPriority: SlatePassName[] = [
+          "whiteboard_enhanced_lower_slate_threshold",
+          "whiteboard_enhanced_lower_slate",
+          "focused_lower_slate",
           "whiteboard_enhanced_foreground_slate_threshold",
           "whiteboard_enhanced_foreground_slate",
           "focused_foreground_slate",
@@ -830,6 +848,9 @@ export async function POST(request: NextRequest) {
 
       if (escalateNow && escalationModel) {
         const escalatePassOrder = [
+          "whiteboard_enhanced_lower_slate",
+          "whiteboard_enhanced_lower_slate_threshold",
+          "focused_lower_slate",
           "whiteboard_enhanced_foreground_slate",
           "whiteboard_enhanced_foreground_slate_threshold",
           "focused_foreground_slate",
