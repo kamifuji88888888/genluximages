@@ -373,12 +373,14 @@ export function pickNameFromVisionWords(
   }
 
   // Slates often write first/last on consecutive lines — merge adjacent short lines.
+  // Always stack by vertical reading order (top → bottom), not discovery order.
   for (let li = 0; li < lines.length - 1; li += 1) {
     const a = [...lines[li]].sort((x, y) => x.cx - y.cx);
     const b = [...lines[li + 1]].sort((x, y) => x.cx - y.cx);
     if (Math.abs(a[0].cy - b[0].cy) > 0.14) continue;
     if (a.length > 2 || b.length > 2) continue;
-    considerSlice([...a, ...b].slice(0, 3));
+    const stacked = [...a, ...b].sort((x, y) => x.cy - y.cy || x.cx - y.cx);
+    considerSlice(stacked.slice(0, 3));
   }
 
   if (!best.name) {
@@ -474,13 +476,21 @@ export async function runOcrOnImageBuffer(
     const { rawText, words } = await runGoogleVisionOcr(prepared);
     const fromBoxes = pickNameFromVisionWords(words, rawText);
     const fromText = pickNameFromOcrTextWithScore(rawText);
-    const boxLooksDuplicated = (() => {
-      const toks = fromBoxes.name.toLowerCase().split(/\s+/).filter(Boolean);
-      return toks.length >= 2 && new Set(toks).size === 1;
-    })();
+    const boxToks = fromBoxes.name.toLowerCase().split(/\s+/).filter(Boolean);
+    const textToks = fromText.name.toLowerCase().split(/\s+/).filter(Boolean);
+    const boxLooksDuplicated = boxToks.length >= 2 && new Set(boxToks).size === 1;
+    const sameTokensReversed =
+      boxToks.length === 2 &&
+      textToks.length === 2 &&
+      boxToks[0] === textToks[1] &&
+      boxToks[1] === textToks[0];
     // Prefer box-aware pick when it found a real name; otherwise fall back to line OCR.
+    // If boxes reverse a two-line slate name, keep text-line reading order.
     const chosen =
-      fromBoxes.name && !boxLooksDuplicated && fromBoxes.score >= fromText.score
+      fromBoxes.name &&
+      !boxLooksDuplicated &&
+      !sameTokensReversed &&
+      fromBoxes.score >= fromText.score
         ? fromBoxes
         : { name: fromText.name, score: fromText.score, boxBonus: fromBoxes.boxBonus || 0 };
     return {
