@@ -158,6 +158,17 @@ function formatNameParts(parts: string[]): string {
     .join(" ");
 }
 
+/** Drop consecutive duplicate tokens (e.g. OCR double-read "Anastasija Anastasija"). */
+function dedupeAdjacentNameParts(parts: string[]): string[] {
+  const out: string[] = [];
+  for (const part of parts) {
+    const prev = out[out.length - 1];
+    if (prev && prev.toLowerCase() === part.toLowerCase()) continue;
+    out.push(part);
+  }
+  return out;
+}
+
 /** Step-and-repeat / sponsor wall text bundled into full-frame Vision reads. */
 const BACKDROP_OCR_KEYWORDS = [
   "philanthropy",
@@ -228,26 +239,35 @@ export function pickNameFromOcrTextWithScore(raw: string): { name: string; score
 
   let best: { name: string; score: number } = { name: "", score: 0 };
 
-  for (const candidate of candidates) {
-    let parts = candidate
-      .split(" ")
-      .map((part) => part.trim().replace(/^'+|'+$/g, ""))
-      .filter((part) => TOKEN.test(part))
-      .slice(0, 4);
-
-    parts = stripLeadingOcrNoiseTokens(parts);
-
-    if (parts.length === 0) continue;
-    if (parts.length === 1 && (parts[0].length < 4 || parts[0].length > 18)) continue;
+  const considerParts = (partsIn: string[], candidate: string) => {
+    let parts = stripLeadingOcrNoiseTokens(partsIn);
+    parts = dedupeAdjacentNameParts(parts);
+    if (parts.length === 0) return;
+    if (parts.length === 1 && (parts[0].length < 4 || parts[0].length > 18)) return;
+    if (parts.length >= 2 && new Set(parts.map((p) => p.toLowerCase())).size === 1) return;
 
     const score = scoreNameParts(parts, candidate);
-    if (score < 0) continue;
+    if (score < 0) return;
 
     const formatted = formatNameParts(parts);
-    if (isLikelySponsorNameArtifact(formatted, raw)) continue;
+    if (isLikelySponsorNameArtifact(formatted, raw)) return;
 
     if (score > best.score) {
       best = { name: formatted, score };
+    }
+  };
+
+  for (const candidate of candidates) {
+    const tokens = candidate
+      .split(" ")
+      .map((part) => part.trim().replace(/^'+|'+$/g, ""))
+      .filter((part) => TOKEN.test(part));
+
+    // Prefer 2–3 token windows so backdrop crumbs ("vie", "lux") do not glue onto names.
+    for (let i = 0; i < tokens.length; i += 1) {
+      for (let len = 1; len <= 3 && i + len <= tokens.length; len += 1) {
+        considerParts(tokens.slice(i, i + len), tokens.slice(i, i + len).join(" "));
+      }
     }
   }
 
@@ -312,38 +332,53 @@ export function pickNameFromVisionWords(
     boxBonus: 0,
   };
 
+  const considerSlice = (slice: typeof tokenWords) => {
+    let parts = slice.map((w) => w.clean);
+    parts = stripLeadingOcrNoiseTokens(parts);
+    parts = dedupeAdjacentNameParts(parts);
+    if (parts.length === 0) return;
+    if (parts.length === 1 && (parts[0].length < 4 || parts[0].length > 18)) return;
+    // Reject duplicate-token "names" like "Anastasija Anastasija"
+    if (parts.length >= 2 && new Set(parts.map((p) => p.toLowerCase())).size === 1) return;
+
+    const nameScore = scoreNameParts(parts, parts.join(" "));
+    if (nameScore < 0) return;
+
+    const cx = slice.reduce((sum, w) => sum + w.cx, 0) / Math.max(1, slice.length);
+    const cy = slice.reduce((sum, w) => sum + w.cy, 0) / Math.max(1, slice.length);
+    const spanX = Math.max(...slice.map((w) => w.cx)) - Math.min(...slice.map((w) => w.cx));
+    const spanY = Math.max(...slice.map((w) => w.cy)) - Math.min(...slice.map((w) => w.cy));
+    // Compact clusters (handheld board) beat wide logo strips
+    const compactBonus = spanX < 0.35 ? 2 : spanX < 0.55 ? 0.5 : -2.5;
+    // Two-line names on a slate are usually stacked tightly
+    const stackedBonus = spanY > 0.01 && spanY < 0.12 && parts.length >= 2 ? 1.5 : 0;
+    const locBonus = foregroundSlateLocationBonus(cx, cy);
+    const confBonus = slice.reduce((sum, w) => sum + (w.confidence || 0), 0) / slice.length;
+    const boxBonus = locBonus + compactBonus + stackedBonus + confBonus;
+    const total = nameScore + boxBonus;
+    const formatted = formatNameParts(parts);
+    if (isLikelySponsorNameArtifact(formatted, fallbackRawText)) return;
+    if (total > best.score) {
+      best = { name: formatted, score: total, boxBonus };
+    }
+  };
+
   for (const line of lines) {
     const ordered = [...line].sort((a, b) => a.cx - b.cx);
     for (let i = 0; i < ordered.length; i += 1) {
       for (let len = 1; len <= 3 && i + len <= ordered.length; len += 1) {
-        const slice = ordered.slice(i, i + len);
-        let parts = slice.map((w) => w.clean);
-        parts = stripLeadingOcrNoiseTokens(parts);
-        if (parts.length === 0) continue;
-        if (parts.length === 1 && (parts[0].length < 4 || parts[0].length > 18)) continue;
-
-        const nameScore = scoreNameParts(parts, parts.join(" "));
-        if (nameScore < 0) continue;
-
-        const cx =
-          slice.reduce((sum, w) => sum + w.cx, 0) / Math.max(1, slice.length);
-        const cy =
-          slice.reduce((sum, w) => sum + w.cy, 0) / Math.max(1, slice.length);
-        const spanX = Math.max(...slice.map((w) => w.cx)) - Math.min(...slice.map((w) => w.cx));
-        // Compact clusters (handheld board) beat wide logo strips
-        const compactBonus = spanX < 0.35 ? 2 : spanX < 0.55 ? 0.5 : -2.5;
-        const locBonus = foregroundSlateLocationBonus(cx, cy);
-        const confBonus =
-          slice.reduce((sum, w) => sum + (w.confidence || 0), 0) / slice.length;
-        const boxBonus = locBonus + compactBonus + confBonus;
-        const total = nameScore + boxBonus;
-        const formatted = formatNameParts(parts);
-        if (isLikelySponsorNameArtifact(formatted, fallbackRawText)) continue;
-        if (total > best.score) {
-          best = { name: formatted, score: total, boxBonus };
-        }
+        considerSlice(ordered.slice(i, i + len));
       }
     }
+  }
+
+  // Slates often write first/last on consecutive lines — merge adjacent short lines.
+  for (let li = 0; li < lines.length - 1; li += 1) {
+    const a = [...lines[li]].sort((x, y) => x.cx - y.cx);
+    const b = [...lines[li + 1]].sort((x, y) => x.cx - y.cx);
+    if (Math.abs(a[0].cy - b[0].cy) > 0.14) continue;
+    if (a.length > 2 || b.length > 2) continue;
+    considerSlice([...a, ...b].slice(0, 3));
   }
 
   if (!best.name) {
@@ -439,9 +474,13 @@ export async function runOcrOnImageBuffer(
     const { rawText, words } = await runGoogleVisionOcr(prepared);
     const fromBoxes = pickNameFromVisionWords(words, rawText);
     const fromText = pickNameFromOcrTextWithScore(rawText);
-    // Prefer box-aware pick when it found a name; otherwise fall back to line OCR.
+    const boxLooksDuplicated = (() => {
+      const toks = fromBoxes.name.toLowerCase().split(/\s+/).filter(Boolean);
+      return toks.length >= 2 && new Set(toks).size === 1;
+    })();
+    // Prefer box-aware pick when it found a real name; otherwise fall back to line OCR.
     const chosen =
-      fromBoxes.name && fromBoxes.score >= fromText.score
+      fromBoxes.name && !boxLooksDuplicated && fromBoxes.score >= fromText.score
         ? fromBoxes
         : { name: fromText.name, score: fromText.score, boxBonus: fromBoxes.boxBonus || 0 };
     return {
