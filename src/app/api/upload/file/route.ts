@@ -1039,7 +1039,7 @@ export async function POST(request: NextRequest) {
         subjectSource = "match";
         subjectConfidence = matchResult.confidence;
         slateMessage = candidateFaceCrop
-          ? `No readable slate in this image; matched "${matchResult.subjectName}" from people you already tagged for this event (face gallery match).`
+          ? `No readable slate in this image; matched "${matchResult.subjectName}" from people you already tagged for this event (face embedding match).`
           : `No readable slate in this image; matched "${matchResult.subjectName}" from people you already tagged for this event (visual match).`;
         // Refresh gallery face crop when we re-ID without a slate
         await upsertKnownSubjectForEvent({

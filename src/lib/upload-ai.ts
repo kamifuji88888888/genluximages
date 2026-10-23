@@ -1,4 +1,5 @@
 import { ParsedFilename } from "@/lib/filename-parser";
+import { matchFaceAgainstKnown } from "@/lib/face-embeddings";
 import { SUBJECT_MATCH_MIN_CONFIDENCE_DEFAULT } from "@/lib/subject-naming-constants";
 
 type CloudSuggestionShape = {
@@ -63,6 +64,8 @@ export type KnownSubjectReference = {
   referenceImageDataUrl: string;
   /** Tight face crop when available — preferred over full-frame for re-ID. */
   faceCropDataUrl?: string;
+  /** Precomputed face descriptor for embedding match (optional). */
+  faceEmbedding?: number[];
 };
 
 /** Min model confidence to auto-apply a visual match when no slate name (default 0.8). */
@@ -618,10 +621,37 @@ export async function matchSubjectAgainstKnown(args: {
   faceCropDataUrl?: string;
   knownSubjects: KnownSubjectReference[];
 }): Promise<SubjectDetectionResult> {
-  if (!args.imageDataUrl || args.knownSubjects.length === 0) return { confidence: 0, source: "none" };
+  if ((!args.imageDataUrl && !args.faceCropDataUrl) || args.knownSubjects.length === 0) {
+    return { confidence: 0, source: "none" };
+  }
+
+  const matchMin = getSubjectMatchMinConfidence();
+  // 1) Embedding / Rekognition match first (cheaper + more reliable for identity).
+  try {
+    const embeddingMatch = await matchFaceAgainstKnown({
+      faceCropDataUrl: args.faceCropDataUrl,
+      imageDataUrl: args.imageDataUrl,
+      knownSubjects: args.knownSubjects,
+    });
+    if (
+      embeddingMatch?.subjectName &&
+      embeddingMatch.confidence >= matchMin
+    ) {
+      return {
+        subjectName: embeddingMatch.subjectName,
+        confidence: embeddingMatch.confidence,
+        source: "match",
+      };
+    }
+  } catch (e) {
+    console.warn("Face embedding match failed; falling back to LLM:", e);
+  }
+
+  // 2) LLM vision fallback
   if ((process.env.AI_UPLOAD_PROVIDER || "").toLowerCase() !== "openai") {
     return { confidence: 0, source: "none" };
   }
+  if (!args.imageDataUrl) return { confidence: 0, source: "none" };
   const apiKey = process.env.OPENAI_API_KEY || "";
   if (!apiKey) return { confidence: 0, source: "none" };
   const model = process.env.AI_UPLOAD_MODEL || "gpt-4.1-mini";

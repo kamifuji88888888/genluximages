@@ -91,6 +91,8 @@ model EventSubjectReference {
   referenceDataUrl   String   @db.Text
   /// Tight face crop from Google Vision FACE_DETECTION when available — preferred for re-ID.
   faceCropDataUrl    String?  @db.Text
+  /// 128-d FaceNet-style descriptor (JSON number[]) for embedding re-ID; optional when crop exists.
+  faceEmbedding      Json?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
   photographer       User     @relation(fields: [photographerId], references: [id], onDelete: Cascade)

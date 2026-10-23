@@ -1,4 +1,8 @@
 import { db } from "@/lib/db";
+import {
+  computeFaceEmbedding,
+  parseFaceEmbedding,
+} from "@/lib/face-embeddings";
 
 const MAX_SUBJECTS_PER_EVENT = 12;
 /** Keep under typical API / DB limits; reference is already a downscaled preview. */
@@ -24,6 +28,8 @@ export type KnownSubjectForMatch = {
   referenceImageDataUrl: string;
   /** Tight face crop when available — preferred for visual re-ID. */
   faceCropDataUrl?: string;
+  /** Precomputed FaceNet-style descriptor when available. */
+  faceEmbedding?: number[];
 };
 
 export async function getKnownSubjectsForEvent(args: {
@@ -40,6 +46,7 @@ export async function getKnownSubjectsForEvent(args: {
     name: r.subjectDisplayName,
     referenceImageDataUrl: r.referenceDataUrl,
     faceCropDataUrl: r.faceCropDataUrl || undefined,
+    faceEmbedding: parseFaceEmbedding(r.faceEmbedding),
   }));
 }
 
@@ -49,6 +56,7 @@ export async function upsertKnownSubjectForEvent(args: {
   name: string;
   referenceImageDataUrl: string;
   faceCropDataUrl?: string;
+  faceEmbedding?: number[];
 }) {
   const slug = normalizeEventSlug(args.eventSlug);
   const display = normalizeName(args.name);
@@ -60,6 +68,11 @@ export async function upsertKnownSubjectForEvent(args: {
   let faceUrl = args.faceCropDataUrl?.trim() || undefined;
   if (faceUrl && faceUrl.length > MAX_REFERENCE_DATA_URL_LENGTH) {
     faceUrl = faceUrl.slice(0, MAX_REFERENCE_DATA_URL_LENGTH);
+  }
+
+  let embedding = parseFaceEmbedding(args.faceEmbedding);
+  if (!embedding && faceUrl) {
+    embedding = await computeFaceEmbedding(faceUrl);
   }
 
   await db.eventSubjectReference.upsert({
@@ -77,11 +90,13 @@ export async function upsertKnownSubjectForEvent(args: {
       subjectDisplayName: display,
       referenceDataUrl: dataUrl,
       faceCropDataUrl: faceUrl,
+      faceEmbedding: embedding ?? undefined,
     },
     update: {
       subjectDisplayName: display,
       referenceDataUrl: dataUrl,
       ...(faceUrl ? { faceCropDataUrl: faceUrl } : {}),
+      ...(embedding ? { faceEmbedding: embedding } : {}),
     },
   });
 
