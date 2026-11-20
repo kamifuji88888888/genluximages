@@ -7,10 +7,22 @@
  */
 import sharp from "sharp";
 import {
+  isDocumentAiConfigured,
+  runDocumentAiOcr,
+} from "@/lib/google-document-ai-ocr";
+import {
   isGoogleVisionConfigured,
   runGoogleVisionOcr,
   type VisionWordBox,
 } from "@/lib/google-vision-ocr";
+
+/** Below this Vision name score, try Document AI Enterprise OCR (when configured). */
+function documentAiFallbackMinScore(): number {
+  const raw = process.env.GOOGLE_DOCUMENT_AI_FALLBACK_MIN_SCORE?.trim() ?? "";
+  const n = Number.parseFloat(raw);
+  if (Number.isFinite(n) && n >= 0 && n <= 20) return n;
+  return 4;
+}
 
 const LABEL_PREFIX =
   /^\s*(name|subject|talent|guest|attendee|person|title|role)\s*[:\-–—]\s*/i;
@@ -464,44 +476,89 @@ export async function runOcrOnImageBuffer(
 ): Promise<{
   candidateName: string;
   rawText: string;
-  provider?: "google" | "tesseract";
+  provider?: "google" | "document_ai" | "tesseract";
   boxBonus?: number;
   words?: VisionWordBox[];
 }> {
-  if (!isGoogleVisionConfigured()) {
+  if (!isGoogleVisionConfigured() && !isDocumentAiConfigured()) {
     return { candidateName: "", rawText: "" };
   }
-  try {
-    const prepared = await prepareImageBufferForSlateOcr(imageBuffer);
-    const { rawText, words } = await runGoogleVisionOcr(prepared);
-    const fromBoxes = pickNameFromVisionWords(words, rawText);
-    const fromText = pickNameFromOcrTextWithScore(rawText);
-    const boxToks = fromBoxes.name.toLowerCase().split(/\s+/).filter(Boolean);
-    const textToks = fromText.name.toLowerCase().split(/\s+/).filter(Boolean);
-    const boxLooksDuplicated = boxToks.length >= 2 && new Set(boxToks).size === 1;
-    const sameTokensReversed =
-      boxToks.length === 2 &&
-      textToks.length === 2 &&
-      boxToks[0] === textToks[1] &&
-      boxToks[1] === textToks[0];
-    // Prefer box-aware pick when it found a real name; otherwise fall back to line OCR.
-    // If boxes reverse a two-line slate name, keep text-line reading order.
-    const chosen =
-      fromBoxes.name &&
-      !boxLooksDuplicated &&
-      !sameTokensReversed &&
-      fromBoxes.score >= fromText.score
-        ? fromBoxes
-        : { name: fromText.name, score: fromText.score, boxBonus: fromBoxes.boxBonus || 0 };
-    return {
-      candidateName: chosen.name,
-      rawText,
-      provider: "google",
-      boxBonus: chosen.boxBonus,
-      words,
-    };
-  } catch (e) {
-    console.error("Google Vision OCR failed:", e);
+
+  const prepared = await prepareImageBufferForSlateOcr(imageBuffer);
+
+  let visionChosen: { name: string; score: number; boxBonus: number } = {
+    name: "",
+    score: -1,
+    boxBonus: 0,
+  };
+  let visionRaw = "";
+  let visionWords: VisionWordBox[] | undefined;
+
+  if (isGoogleVisionConfigured()) {
+    try {
+      const { rawText, words } = await runGoogleVisionOcr(prepared);
+      visionRaw = rawText;
+      visionWords = words;
+      const fromBoxes = pickNameFromVisionWords(words, rawText);
+      const fromText = pickNameFromOcrTextWithScore(rawText);
+      const boxToks = fromBoxes.name.toLowerCase().split(/\s+/).filter(Boolean);
+      const textToks = fromText.name.toLowerCase().split(/\s+/).filter(Boolean);
+      const boxLooksDuplicated = boxToks.length >= 2 && new Set(boxToks).size === 1;
+      const sameTokensReversed =
+        boxToks.length === 2 &&
+        textToks.length === 2 &&
+        boxToks[0] === textToks[1] &&
+        boxToks[1] === textToks[0];
+      // Prefer box-aware pick when it found a real name; otherwise fall back to line OCR.
+      // If boxes reverse a two-line slate name, keep text-line reading order.
+      visionChosen =
+        fromBoxes.name &&
+        !boxLooksDuplicated &&
+        !sameTokensReversed &&
+        fromBoxes.score >= fromText.score
+          ? fromBoxes
+          : { name: fromText.name, score: fromText.score, boxBonus: fromBoxes.boxBonus || 0 };
+    } catch (e) {
+      console.error("Google Vision OCR failed:", e);
+    }
+  }
+
+  const needDocumentAi =
+    isDocumentAiConfigured() &&
+    (!visionChosen.name || visionChosen.score < documentAiFallbackMinScore());
+
+  if (needDocumentAi) {
+    try {
+      const doc = await runDocumentAiOcr(prepared);
+      if (doc?.rawText) {
+        const fromDoc = pickNameFromOcrTextWithScore(doc.rawText);
+        if (
+          fromDoc.name &&
+          (fromDoc.score > visionChosen.score ||
+            (!visionChosen.name && fromDoc.score >= 0))
+        ) {
+          return {
+            candidateName: fromDoc.name,
+            rawText: doc.rawText,
+            provider: "document_ai",
+            boxBonus: 0,
+          };
+        }
+      }
+    } catch (e) {
+      console.warn("Document AI OCR fallback failed:", e);
+    }
+  }
+
+  if (!visionChosen.name && !visionRaw) {
     return { candidateName: "", rawText: "" };
   }
+
+  return {
+    candidateName: visionChosen.name,
+    rawText: visionRaw,
+    provider: "google",
+    boxBonus: visionChosen.boxBonus,
+    words: visionWords,
+  };
 }

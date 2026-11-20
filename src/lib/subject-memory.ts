@@ -3,6 +3,7 @@ import {
   computeFaceEmbedding,
   parseFaceEmbedding,
 } from "@/lib/face-embeddings";
+import { indexSubjectFaceInCollection } from "@/lib/rekognition-gallery";
 
 const MAX_SUBJECTS_PER_EVENT = 12;
 /** Keep under typical API / DB limits; reference is already a downscaled preview. */
@@ -23,6 +24,15 @@ function subjectKey(name: string) {
   return normalizeName(name).toLowerCase();
 }
 
+function dataUrlToBuffer(dataUrl: string): Buffer | null {
+  const marker = "base64,";
+  const i = dataUrl.indexOf(marker);
+  if (i === -1) return null;
+  const payload = dataUrl.slice(i + marker.length);
+  if (!payload) return null;
+  return Buffer.from(payload, "base64");
+}
+
 export type KnownSubjectForMatch = {
   name: string;
   referenceImageDataUrl: string;
@@ -30,6 +40,7 @@ export type KnownSubjectForMatch = {
   faceCropDataUrl?: string;
   /** Precomputed FaceNet-style descriptor when available. */
   faceEmbedding?: number[];
+  rekognitionFaceId?: string;
 };
 
 export async function getKnownSubjectsForEvent(args: {
@@ -47,6 +58,7 @@ export async function getKnownSubjectsForEvent(args: {
     referenceImageDataUrl: r.referenceDataUrl,
     faceCropDataUrl: r.faceCropDataUrl || undefined,
     faceEmbedding: parseFaceEmbedding(r.faceEmbedding),
+    rekognitionFaceId: r.rekognitionFaceId || undefined,
   }));
 }
 
@@ -75,6 +87,19 @@ export async function upsertKnownSubjectForEvent(args: {
     embedding = await computeFaceEmbedding(faceUrl);
   }
 
+  let rekognitionFaceId: string | undefined;
+  if (faceUrl) {
+    const faceBuf = dataUrlToBuffer(faceUrl);
+    if (faceBuf) {
+      rekognitionFaceId = await indexSubjectFaceInCollection({
+        photographerId: args.photographerId,
+        eventSlug: slug,
+        subjectKey: key,
+        faceImage: faceBuf,
+      });
+    }
+  }
+
   await db.eventSubjectReference.upsert({
     where: {
       photographerId_eventSlug_subjectKey: {
@@ -91,12 +116,14 @@ export async function upsertKnownSubjectForEvent(args: {
       referenceDataUrl: dataUrl,
       faceCropDataUrl: faceUrl,
       faceEmbedding: embedding ?? undefined,
+      rekognitionFaceId,
     },
     update: {
       subjectDisplayName: display,
       referenceDataUrl: dataUrl,
       ...(faceUrl ? { faceCropDataUrl: faceUrl } : {}),
       ...(embedding ? { faceEmbedding: embedding } : {}),
+      ...(rekognitionFaceId ? { rekognitionFaceId } : {}),
     },
   });
 

@@ -96,6 +96,8 @@ export async function retryNeedsManualSubjectNaming(args: {
       portraitCropDataUrl: portraitCrop,
       faceCropDataUrl: faceCrop?.dataUrl,
       knownSubjects: known,
+      photographerId: args.photographerId,
+      eventSlug: slug,
     });
 
     if (match.subjectName && match.confidence >= minConf) {

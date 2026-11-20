@@ -928,6 +928,8 @@ export async function POST(request: NextRequest) {
             portraitCropDataUrl: portraitReidCrop,
             faceCropDataUrl: candidateFaceCrop?.dataUrl,
             knownSubjects,
+            photographerId,
+            eventSlug: eventSlugForSubjects,
           });
         }
       }

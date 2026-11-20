@@ -6,6 +6,7 @@ const nextConfig: NextConfig = {
     "@tensorflow/tfjs",
     "@tensorflow/tfjs-backend-wasm",
     "@aws-sdk/client-rekognition",
+    "google-auth-library",
   ],
   images: {
     remotePatterns: [

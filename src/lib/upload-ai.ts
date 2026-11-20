@@ -620,6 +620,9 @@ export async function matchSubjectAgainstKnown(args: {
   /** Optional tight face crop (Google Vision FACE_DETECTION) — strongest re-ID signal. */
   faceCropDataUrl?: string;
   knownSubjects: KnownSubjectReference[];
+  /** Enables Rekognition 1:N collection search when set with eventSlug. */
+  photographerId?: string;
+  eventSlug?: string;
 }): Promise<SubjectDetectionResult> {
   if ((!args.imageDataUrl && !args.faceCropDataUrl) || args.knownSubjects.length === 0) {
     return { confidence: 0, source: "none" };
@@ -632,6 +635,8 @@ export async function matchSubjectAgainstKnown(args: {
       faceCropDataUrl: args.faceCropDataUrl,
       imageDataUrl: args.imageDataUrl,
       knownSubjects: args.knownSubjects,
+      photographerId: args.photographerId,
+      eventSlug: args.eventSlug,
     });
     if (
       embeddingMatch?.subjectName &&

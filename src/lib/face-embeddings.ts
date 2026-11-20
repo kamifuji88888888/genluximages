@@ -2,8 +2,9 @@
  * Face embedding re-ID: numeric descriptors + cosine / Euclidean match.
  *
  * Backends (first available wins for gallery compare):
- * 1. Amazon Rekognition CompareFaces — when AWS keys are configured
- * 2. Local FaceNet-style descriptors via @vladmandic/face-api (WASM) — no extra keys
+ * 1. Amazon Rekognition SearchFacesByImage (1:N collection) when AWS + gallery context
+ * 2. Amazon Rekognition CompareFaces pairwise fallback
+ * 3. Local FaceNet-style descriptors via @vladmandic/face-api (WASM) — no extra keys
  *
  * LLM vision match remains a fallback in upload-ai when embeddings are inconclusive.
  */
@@ -14,6 +15,13 @@ import {
   CompareFacesCommand,
   RekognitionClient,
 } from "@aws-sdk/client-rekognition";
+import {
+  isRekognitionConfigured,
+  rekognitionExternalImageId,
+  searchSubjectFaceInCollection,
+} from "@/lib/rekognition-gallery";
+
+export { isRekognitionConfigured } from "@/lib/rekognition-gallery";
 
 export const FACE_EMBEDDING_DIM = 128;
 
@@ -129,19 +137,6 @@ function faceMatchProvider(): "auto" | "local" | "rekognition" | "off" {
   const v = (process.env.FACE_EMBEDDING_PROVIDER || "auto").trim().toLowerCase();
   if (v === "local" || v === "rekognition" || v === "off" || v === "auto") return v;
   return "auto";
-}
-
-export function isRekognitionConfigured(): boolean {
-  const dedicatedKey = process.env.REKOGNITION_ACCESS_KEY_ID?.trim();
-  const dedicatedSecret = process.env.REKOGNITION_SECRET_ACCESS_KEY?.trim();
-  if (dedicatedKey && dedicatedSecret) return true;
-
-  // Reuse S3 keys only when talking to real AWS (no custom R2/MinIO endpoint).
-  const endpoint = process.env.S3_ENDPOINT?.trim();
-  if (endpoint) return false;
-  const key = process.env.S3_ACCESS_KEY_ID?.trim();
-  const secret = process.env.S3_SECRET_ACCESS_KEY?.trim();
-  return Boolean(key && secret);
 }
 
 function getRekognitionClient(): RekognitionClient | null {
@@ -364,6 +359,9 @@ export async function matchFaceAgainstKnown(args: {
     faceCropDataUrl?: string;
     faceEmbedding?: number[];
   }>;
+  /** When set with eventSlug, enables Rekognition 1:N collection search. */
+  photographerId?: string;
+  eventSlug?: string;
 }): Promise<FaceEmbeddingMatch | undefined> {
   const provider = faceMatchProvider();
   if (provider === "off") return undefined;
@@ -381,21 +379,48 @@ export async function matchFaceAgainstKnown(args: {
   const withFaces = args.knownSubjects.filter(
     (s) => s.faceCropDataUrl?.trim() || parseFaceEmbedding(s.faceEmbedding),
   );
-  if (withFaces.length === 0) return undefined;
-
+  // Collection search can work even before local embeddings exist (indexed faces only)
   const wantRekognition = provider === "rekognition" || provider === "auto";
   const wantLocal = provider === "local" || provider === "auto";
 
   if (wantRekognition && isRekognitionConfigured()) {
-    const rek = await matchWithRekognition({
-      candidateFaceCrop: candidateBuf,
-      knownSubjects: withFaces,
-    });
-    if (rek) return rek;
+    const photoId = args.photographerId?.trim();
+    const eventSlug = args.eventSlug?.trim();
+    if (photoId && eventSlug) {
+      const collectionHit = await searchSubjectFaceInCollection({
+        photographerId: photoId,
+        eventSlug,
+        faceImage: candidateBuf,
+      });
+      if (collectionHit) {
+        const ext = collectionHit.externalImageId.toLowerCase();
+        const chosen =
+          args.knownSubjects.find(
+            (s) => rekognitionExternalImageId(s.name) === ext,
+          ) ||
+          args.knownSubjects.find((s) => s.name.toLowerCase().replace(/\s+/g, "_") === ext);
+        if (chosen) {
+          return {
+            subjectName: chosen.name,
+            confidence: Math.max(0.8, Math.min(0.99, collectionHit.similarity / 100)),
+            similarity: collectionHit.similarity,
+            backend: "rekognition",
+          };
+        }
+      }
+    }
+
+    if (withFaces.length > 0) {
+      const rek = await matchWithRekognition({
+        candidateFaceCrop: candidateBuf,
+        knownSubjects: withFaces,
+      });
+      if (rek) return rek;
+    }
     if (provider === "rekognition") return undefined;
   }
 
-  if (wantLocal) {
+  if (wantLocal && withFaces.length > 0) {
     const candidateEmbedding = await computeFaceEmbedding(candidateBuf);
     if (!candidateEmbedding) return undefined;
     return matchWithLocalEmbeddings({
